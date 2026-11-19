@@ -832,7 +832,7 @@ class PanelDireccion:
 
     def _seguimiento_tabla(self, alumno):
         if alumno: self.registrar_seguimiento(int(alumno[0]), alumno[1])
-
+# Mario Ian Tovar Alva
     def _incidencia_tabla(self, alumno):
         if not alumno: return
         datos = self.formulario_modal("Registrar incidencia", [("Tipo", "", None), ("Descripción", "", None)])
