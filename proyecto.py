@@ -8,11 +8,6 @@ import csv
 from datetime import date, datetime
 import calendar
 
-# ==========================================================
-# PRIMARIA NEZAHUALCÓYOTL | PANEL DE DIRECCIÓN Y DOCENTE
-# Versión optimizada con rutas seguras para compilación
-# ==========================================================
-
 TEMAS = {
     "claro": {
         "BG": "#EBF2F0",           
