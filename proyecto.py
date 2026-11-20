@@ -1,12 +1,27 @@
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
-import sqlite3
+import mysql.connector
+from mysql.connector import Error as MySQLError, IntegrityError
 import os
 import sys
 import csv
 from datetime import date, datetime
 import calendar
+
+# ==========================================================
+# PRIMARIA NEZAHUALCÓYOTL | PANEL DE DIRECCIÓN Y DOCENTE
+# Base de datos principal en MySQL (INT y VARCHAR)
+# ==========================================================
+
+MYSQL_CONFIG = {
+    "host": "localhost",
+    "user": "root",
+    "password": "",
+    "database":"primaria_nezahualcoyotl_db"
+}
+
+DB_NOMBRE = "primaria_nezahualcoyotl_db"
 
 TEMAS = {
     "claro": {
@@ -57,7 +72,6 @@ TEMAS = {
 
 UMBRAL_FALTAS = 3
 
-# --- RUTA SEGURA PARA COMPILACIÓN (PyInstaller / Pydroid) ---
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
@@ -66,7 +80,166 @@ else:
     except NameError:
         BASE_DIR = os.getcwd()
 
-DB_PATH = os.path.join(BASE_DIR, "direccion_nezahualcoyotl.db")
+GRUPOS_INICIALES = [
+    ("1° A", "Sofía Hernández Vega", 31),
+    ("2° A", "María López Gómez", 35),
+    ("2° B", "Luis Ramírez Díaz", 33),
+    ("3° B", "Juan Pérez Cruz", 34),
+    ("4° A", "Ana Martínez Solís", 32),
+]
+
+ALUMNOS_INICIALES = [
+    ("Santiago Pérez Gómez", "2° A", 0, 0),
+    ("Valentina Cruz Ruiz", "2° A", 1, 0),
+    ("Mateo Morales López", "2° A", 2, 0),
+    ("Sofía Castillo Vega", "2° A", 3, 1),
+    ("Alejandro Torres Silva", "2° A", 0, 3),
+    ("Camila Ortiz Mendoza", "2° A", 1, 0),
+    ("Diego Ramos Castro", "2° A", 0, 0),
+    ("Regina Flores Jiménez", "2° B", 0, 0),
+    ("Daniel Vargas Soto", "2° B", 2, 1),
+    ("Lucía Mendoza Ríos", "3° B", 1, 3),
+    ("Emiliano Herrera Luna", "4° A", 0, 0),
+    ("Ximena Rivas Domínguez", "4° A", 0, 0),
+]
+
+
+def _ejecutar_script_mysql(cursor, script_sql):
+    for sentencia in script_sql.split(";"):
+        stmt = sentencia.strip()
+        if stmt:
+            cursor.execute(stmt)
+
+
+def conectar_mysql(incluir_bd=True):
+    cfg = dict(MYSQL_CONFIG)
+    if incluir_bd:
+        cfg["database"] = DB_NOMBRE
+    return mysql.connector.connect(**cfg)
+
+
+def inicializar_base_datos_principal():
+    try:
+        with conectar_mysql(incluir_bd=False) as srv:
+            cur = srv.cursor()
+            cur.execute(
+                f"CREATE DATABASE IF NOT EXISTS {DB_NOMBRE} "
+                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            )
+            srv.commit()
+
+        with conectar_mysql(incluir_bd=True) as db:
+            cur = db.cursor()
+            _ejecutar_script_mysql(cur, """
+                CREATE TABLE IF NOT EXISTS metricas (
+                    nombre VARCHAR(50) PRIMARY KEY,
+                    valor INT NOT NULL
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS grupos (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    grupo VARCHAR(30) NOT NULL UNIQUE,
+                    docente VARCHAR(120) NOT NULL,
+                    alumnos INT NOT NULL DEFAULT 0
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS alumnos (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    nombre VARCHAR(120) NOT NULL,
+                    grupo VARCHAR(30) NOT NULL,
+                    retardos INT NOT NULL DEFAULT 0,
+                    faltas INT NOT NULL DEFAULT 0,
+                    UNIQUE KEY uq_alumno_grupo (nombre, grupo)
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS asistencias (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    alumno_id INT NOT NULL,
+                    fecha VARCHAR(20) NOT NULL,
+                    estado VARCHAR(20) NOT NULL,
+                    UNIQUE KEY uq_asistencia_dia (alumno_id, fecha),
+                    CONSTRAINT fk_asistencia_alumno
+                        FOREIGN KEY (alumno_id) REFERENCES alumnos(id)
+                        ON DELETE CASCADE
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS justificantes (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    alumno VARCHAR(120) NOT NULL,
+                    grupo VARCHAR(30) NOT NULL,
+                    fecha VARCHAR(20) NOT NULL,
+                    motivo VARCHAR(255) NOT NULL,
+                    estado VARCHAR(30) NOT NULL DEFAULT 'Pendiente'
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS seguimientos (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    alumno_id INT NOT NULL,
+                    fecha VARCHAR(20) NOT NULL,
+                    nota VARCHAR(500) NOT NULL,
+                    CONSTRAINT fk_seguimiento_alumno
+                        FOREIGN KEY (alumno_id) REFERENCES alumnos(id)
+                        ON DELETE CASCADE
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS incidencias (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    alumno_id INT NOT NULL,
+                    fecha VARCHAR(20) NOT NULL,
+                    tipo VARCHAR(80) NOT NULL,
+                    descripcion VARCHAR(500) NOT NULL,
+                    estado VARCHAR(30) NOT NULL DEFAULT 'Pendiente',
+                    CONSTRAINT fk_incidencia_alumno
+                        FOREIGN KEY (alumno_id) REFERENCES alumnos(id)
+                        ON DELETE CASCADE
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS eventos (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    fecha VARCHAR(20) NOT NULL,
+                    titulo VARCHAR(160) NOT NULL
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS comunicados (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    fecha VARCHAR(20) NOT NULL,
+                    titulo VARCHAR(160) NOT NULL,
+                    mensaje VARCHAR(500) NOT NULL
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS bitacora (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    fecha VARCHAR(20) NOT NULL,
+                    entrada VARCHAR(500) NOT NULL
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS mensajes_docente (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    docente VARCHAR(120) NOT NULL,
+                    fecha VARCHAR(20) NOT NULL,
+                    asunto VARCHAR(160) NOT NULL,
+                    mensaje VARCHAR(500) NOT NULL
+                ) ENGINE=InnoDB;
+            """)
+            cur.executemany(
+                "INSERT IGNORE INTO metricas (nombre, valor) VALUES (%s, %s)",
+                [("Alumnos", 420), ("Presentes", 0), ("Retardos", 0),
+                 ("Faltas", 0), ("Incidencias", 0)]
+            )
+            for fila in GRUPOS_INICIALES:
+                cur.execute(
+                    "INSERT IGNORE INTO grupos (grupo, docente, alumnos) VALUES (%s, %s, %s)",
+                    fila
+                )
+            cur.execute("SELECT COUNT(*) FROM alumnos")
+            if cur.fetchone()[0] == 0:
+                cur.executemany(
+                    "INSERT INTO alumnos (nombre, grupo, retardos, faltas) VALUES (%s, %s, %s, %s)",
+                    ALUMNOS_INICIALES
+                )
+            db.commit()
+    except MySQLError as e:
+        messagebox.showerror("Error de conexión MySQL", f"No se pudo inicializar {DB_NOMBRE}:\n{e}")
 
 
 class PanelDireccion:
@@ -82,7 +255,7 @@ class PanelDireccion:
         self.pagina = "Inicio"
         self.compacto = False
         self._resize_job = None
-        self.iniciar_db()
+        inicializar_base_datos_principal()
         self.configurar_estilos()
         self.root.bind("<Configure>", self.detectar_tamano)
         self.pantalla_login()
@@ -116,90 +289,8 @@ class PanelDireccion:
         self.configurar_estilos()
         self.crear_panel(self.pagina)
 
-    def conectar(self):
-        db = sqlite3.connect(DB_PATH)
-        db.execute("PRAGMA foreign_keys = ON")
-        return db
-
-    def iniciar_db(self):
-        with self.conectar() as db:
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS metricas(
-                    nombre TEXT PRIMARY KEY, valor INTEGER NOT NULL);
-                CREATE TABLE IF NOT EXISTS grupos(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    grupo TEXT NOT NULL UNIQUE, docente TEXT NOT NULL,
-                    alumnos INTEGER NOT NULL DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS alumnos(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    nombre TEXT NOT NULL, grupo TEXT NOT NULL,
-                    retardos INTEGER NOT NULL DEFAULT 0,
-                    faltas INTEGER NOT NULL DEFAULT 0,
-                    UNIQUE(nombre, grupo));
-                CREATE TABLE IF NOT EXISTS asistencias(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    alumno_id INTEGER NOT NULL, fecha TEXT NOT NULL,
-                    estado TEXT NOT NULL, UNIQUE(alumno_id, fecha),
-                    FOREIGN KEY(alumno_id) REFERENCES alumnos(id));
-                CREATE TABLE IF NOT EXISTS justificantes(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    alumno TEXT NOT NULL, grupo TEXT NOT NULL,
-                    fecha TEXT NOT NULL, motivo TEXT NOT NULL,
-                    estado TEXT NOT NULL DEFAULT 'Pendiente');
-                CREATE TABLE IF NOT EXISTS seguimientos(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    alumno_id INTEGER NOT NULL, fecha TEXT NOT NULL,
-                    nota TEXT NOT NULL,
-                    FOREIGN KEY(alumno_id) REFERENCES alumnos(id));
-                CREATE TABLE IF NOT EXISTS incidencias(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    alumno_id INTEGER NOT NULL, fecha TEXT NOT NULL,
-                    tipo TEXT NOT NULL, descripcion TEXT NOT NULL,
-                    estado TEXT NOT NULL DEFAULT 'Pendiente',
-                    FOREIGN KEY(alumno_id) REFERENCES alumnos(id));
-                CREATE TABLE IF NOT EXISTS eventos(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    fecha TEXT NOT NULL, titulo TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS comunicados(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    fecha TEXT NOT NULL, titulo TEXT NOT NULL, mensaje TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS bitacora(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    fecha TEXT NOT NULL, entrada TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS mensajes_docente(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    docente TEXT NOT NULL, fecha TEXT NOT NULL,
-                    asunto TEXT NOT NULL, mensaje TEXT NOT NULL);
-            """)
-            db.executemany(
-                "INSERT OR IGNORE INTO metricas(nombre,valor) VALUES (?,?)",
-                [("Alumnos", 420), ("Presentes", 0), ("Retardos", 0),
-                 ("Faltas", 0), ("Incidencias", 0)])
-            grupos = [
-                ("1° A", "Sofía Hernández Vega", 31),
-                ("2° A", "María López Gómez", 35),
-                ("2° B", "Luis Ramírez Díaz", 33),
-                ("3° B", "Juan Pérez Cruz", 34),
-                ("4° A", "Ana Martínez Solís", 32)]
-            for fila in grupos:
-                db.execute("INSERT OR IGNORE INTO grupos(grupo,docente,alumnos) VALUES (?,?,?)", fila)
-            if db.execute("SELECT COUNT(*) FROM alumnos").fetchone()[0] == 0:
-                db.executemany(
-                    "INSERT INTO alumnos(nombre,grupo,retardos,faltas) VALUES (?,?,?,?)",
-                    [
-                        ("Santiago Pérez Gómez", "2° A", 0, 0),
-                        ("Valentina Cruz Ruiz", "2° A", 1, 0),
-                        ("Mateo Morales López", "2° A", 2, 0),
-                        ("Sofía Castillo Vega", "2° A", 3, 1),
-                        ("Alejandro Torres Silva", "2° A", 0, 3),
-                        ("Camila Ortiz Mendoza", "2° A", 1, 0),
-                        ("Diego Ramos Castro", "2° A", 0, 0),
-                        ("Regina Flores Jiménez", "2° B", 0, 0),
-                        ("Daniel Vargas Soto", "2° B", 2, 1),
-                        ("Lucía Mendoza Ríos", "3° B", 1, 3),
-                        ("Emiliano Herrera Luna", "4° A", 0, 0),
-                        ("Ximena Rivas Domínguez", "4° A", 0, 0)
-                    ])
+    def conectar(self, incluir_bd=True):
+        return conectar_mysql(incluir_bd=incluir_bd)
 
     def configurar_estilos(self):
         s = ttk.Style()
@@ -367,10 +458,16 @@ class PanelDireccion:
             if user.lower() == "director" and passw == "1234":
                 self.crear_panel()
             else:
-                with self.conectar() as db:
-                    docente_db = db.execute("SELECT docente FROM grupos WHERE docente LIKE ? COLLATE NOCASE", (f"%{user}%",)).fetchone()
-                if passw == "1234" and (user.lower() == "docente" or docente_db):
-                    nombre_docente = docente_db[0] if docente_db else user
+                docente_row = None
+                try:
+                    with self.conectar(incluir_bd=True) as db:
+                        cur = db.cursor()
+                        cur.execute("SELECT docente FROM grupos WHERE LOWER(docente) LIKE LOWER(%s)", (f"%{user}%",))
+                        docente_row = cur.fetchone()
+                except MySQLError:
+                    pass
+                if passw == "1234" and (user.lower() == "docente" or docente_row):
+                    nombre_docente = docente_row[0] if docente_row else user
                     self.limpiar_raiz()
                     PanelDocente(self.root, nombre_docente, self.modo_oscuro)
                 else:
@@ -530,28 +627,39 @@ class PanelDireccion:
         rutas.get(pagina, self.pagina_inicio)()
 
     def obtener_metricas(self):
-        with self.conectar() as db:
-            data = dict(db.execute("SELECT nombre,valor FROM metricas").fetchall())
-            total = db.execute("SELECT COUNT(*) FROM alumnos").fetchone()[0]
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("SELECT nombre, valor FROM metricas")
+            data = dict(cur.fetchall())
+            cur.execute("SELECT COUNT(*) FROM alumnos")
+            total = cur.fetchone()[0]
             if total:
                 data["Alumnos"] = total
             return data
 
     def obtener_alumnos(self):
-        with self.conectar() as db:
-            return db.execute("SELECT id,nombre,grupo,retardos,faltas FROM alumnos ORDER BY grupo,nombre").fetchall()
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("SELECT id, nombre, grupo, retardos, faltas FROM alumnos ORDER BY grupo, nombre")
+            return cur.fetchall()
 
     def obtener_grupos(self):
-        with self.conectar() as db:
-            return db.execute("SELECT id,grupo,docente,alumnos FROM grupos ORDER BY grupo").fetchall()
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("SELECT id, grupo, docente, alumnos FROM grupos ORDER BY grupo")
+            return cur.fetchall()
 
     def contar_justificantes(self):
-        with self.conectar() as db:
-            return db.execute("SELECT COUNT(*) FROM justificantes WHERE estado='Pendiente'").fetchone()[0]
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("SELECT COUNT(*) FROM justificantes WHERE estado='Pendiente'")
+            return cur.fetchone()[0]
 
     def contar_incidencias(self):
-        with self.conectar() as db:
-            return db.execute("SELECT COUNT(*) FROM incidencias WHERE estado='Pendiente'").fetchone()[0]
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("SELECT COUNT(*) FROM incidencias WHERE estado='Pendiente'")
+            return cur.fetchone()[0]
 
     def pagina_inicio(self):
         m = self.obtener_metricas()
@@ -665,14 +773,19 @@ class PanelDireccion:
         self.boton(actions, "Editar grupo", self.editar_grupo, self.DARK, self.WHITE).pack(side="left", padx=2)
         self.boton(actions, "Actualizar", lambda: self.mostrar("Grupos y Docentes"), self.BLUE_SOFT, self.NAVY).pack(side="left", padx=2)
         
-        with self.conectar() as db:
-            filas = db.execute("""
-                SELECT g.grupo,g.docente,g.alumnos,
-                COALESCE(SUM(a.retardos),0), COALESCE(SUM(a.faltas),0),
-                COALESCE(SUM(CASE WHEN a.faltas>=? THEN 1 ELSE 0 END),0)
-                FROM grupos g LEFT JOIN alumnos a ON a.grupo=g.grupo
-                GROUP BY g.id ORDER BY 6 DESC,5 DESC
-            """, (UMBRAL_FALTAS,)).fetchall()
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("""
+                SELECT g.grupo, g.docente, g.alumnos,
+                       COALESCE(SUM(a.retardos), 0),
+                       COALESCE(SUM(a.faltas), 0),
+                       COALESCE(SUM(CASE WHEN a.faltas >= %s THEN 1 ELSE 0 END), 0)
+                FROM grupos g
+                LEFT JOIN alumnos a ON a.grupo = g.grupo
+                GROUP BY g.id, g.grupo, g.docente, g.alumnos
+                ORDER BY 6 DESC, 5 DESC
+            """, (UMBRAL_FALTAS,))
+            filas = cur.fetchall()
         self.tabla_grupos_actual = self.crear_tabla(box, ("Grupo", "Docente", "Alumnos", "Retardos", "Faltas", "Alertas"),
                                                     filas, {"Grupo": 70, "Docente": 160}, 5)
 
@@ -683,11 +796,13 @@ class PanelDireccion:
         ])
         if not datos: return
         try:
-            with self.conectar() as db:
-                db.execute("INSERT INTO grupos(grupo,docente,alumnos) VALUES (?,?,0)",
-                           (datos["Nombre del grupo"], datos["Nombre del docente"]))
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("INSERT INTO grupos (grupo, docente, alumnos) VALUES (%s, %s, 0)",
+                            (datos["Nombre del grupo"], datos["Nombre del docente"]))
+                db.commit()
             self.mostrar("Grupos y Docentes")
-        except sqlite3.IntegrityError:
+        except IntegrityError:
             messagebox.showwarning("Grupo existente", "Ese grupo ya está registrado.")
 
     def editar_grupo(self):
@@ -703,14 +818,16 @@ class PanelDireccion:
         ])
         if not datos: return
         try:
-            with self.conectar() as db:
-                db.execute("UPDATE grupos SET grupo=?, docente=? WHERE grupo=?",
-                           (datos["Nombre del grupo"], datos["Nombre del docente"], grupo_original))
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("UPDATE grupos SET grupo=%s, docente=%s WHERE grupo=%s",
+                            (datos["Nombre del grupo"], datos["Nombre del docente"], grupo_original))
                 if datos["Nombre del grupo"] != grupo_original:
-                    db.execute("UPDATE alumnos SET grupo=? WHERE grupo=?",
-                               (datos["Nombre del grupo"], grupo_original))
+                    cur.execute("UPDATE alumnos SET grupo=%s WHERE grupo=%s",
+                                (datos["Nombre del grupo"], grupo_original))
+                db.commit()
             self.mostrar("Grupos y Docentes")
-        except sqlite3.IntegrityError:
+        except IntegrityError:
             messagebox.showwarning("Nombre duplicado", "Ya existe un grupo con ese nombre.")
 
     def alumno_seleccionado(self, tabla=None):
@@ -723,8 +840,11 @@ class PanelDireccion:
         datos = self.formulario_modal("Registrar seguimiento", [(f"Nota para {nombre}", "", None)])
         if not datos: return
         nota = datos[f"Nota para {nombre}"]
-        with self.conectar() as db:
-            db.execute("INSERT INTO seguimientos(alumno_id,fecha,nota) VALUES (?,?,?)", (alumno_id, date.today().isoformat(), nota))
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("INSERT INTO seguimientos (alumno_id, fecha, nota) VALUES (%s, %s, %s)",
+                        (alumno_id, date.today().isoformat(), nota))
+            db.commit()
         messagebox.showinfo("Guardado", "La nota se registró correctamente.")
         self.mostrar(self.pagina)
 
@@ -735,8 +855,10 @@ class PanelDireccion:
 
         listing = self.seccion(self.contenido, "Historial de Comunicados Emitidos")
         listing.pack(fill="both", padx=14, pady=6)
-        with self.conectar() as db:
-            rows = db.execute("SELECT id, fecha, titulo, mensaje FROM comunicados ORDER BY id DESC").fetchall()
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("SELECT id, fecha, titulo, mensaje FROM comunicados ORDER BY id DESC")
+            rows = cur.fetchall()
         self.crear_tabla(listing, ("ID", "Fecha", "Título", "Mensaje"), rows, {"Título": 160, "Mensaje": 240}, 6)
 
     def agregar_comunicado(self):
@@ -745,9 +867,11 @@ class PanelDireccion:
             ("Mensaje detallado", "", None)
         ])
         if not datos: return
-        with self.conectar() as db:
-            db.execute("INSERT INTO comunicados(fecha, titulo, mensaje) VALUES (?,?,?)",
-                       (date.today().isoformat(), datos["Título del aviso"], datos["Mensaje detallado"]))
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("INSERT INTO comunicados (fecha, titulo, mensaje) VALUES (%s, %s, %s)",
+                        (date.today().isoformat(), datos["Título del aviso"], datos["Mensaje detallado"]))
+            db.commit()
         messagebox.showinfo("Enviado", "El comunicado se ha registrado.")
         self.mostrar("Comunicados Oficiales")
 
@@ -758,8 +882,11 @@ class PanelDireccion:
         def agregar_entrada():
             datos = self.formulario_modal("Nueva Nota de Bitácora", [("Descripción del evento", "", None)])
             if not datos: return
-            with self.conectar() as db:
-                db.execute("INSERT INTO bitacora(fecha, entrada) VALUES (?, ?)", (date.today().isoformat(), datos["Descripción del evento"]))
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("INSERT INTO bitacora (fecha, entrada) VALUES (%s, %s)",
+                            (date.today().isoformat(), datos["Descripción del evento"]))
+                db.commit()
             messagebox.showinfo("Guardado", "Entrada agregada.")
             self.mostrar("Bitácora Directiva")
 
@@ -767,15 +894,21 @@ class PanelDireccion:
 
         listing = self.seccion(self.contenido, "Registro Histórico de Bitácora")
         listing.pack(fill="both", padx=14, pady=6)
-        with self.conectar() as db:
-            rows = db.execute("SELECT id, fecha, entrada FROM bitacora ORDER BY id DESC").fetchall()
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("SELECT id, fecha, entrada FROM bitacora ORDER BY id DESC")
+            rows = cur.fetchall()
         self.crear_tabla(listing, ("ID", "Fecha", "Entrada"), rows, {"Entrada": 280}, 6)
 
     def resumen_alertas(self, parent, limite=None):
-        with self.conectar() as db:
-            alumnos = db.execute("SELECT COUNT(*) FROM alumnos WHERE faltas>=? OR retardos>=?", (UMBRAL_FALTAS, UMBRAL_FALTAS)).fetchone()[0]
-            just = db.execute("SELECT COUNT(*) FROM justificantes WHERE estado='Pendiente'").fetchone()[0]
-            inc = db.execute("SELECT COUNT(*) FROM incidencias WHERE estado='Pendiente'").fetchone()[0]
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("SELECT COUNT(*) FROM alumnos WHERE faltas >= %s OR retardos >= %s", (UMBRAL_FALTAS, UMBRAL_FALTAS))
+            alumnos = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM justificantes WHERE estado='Pendiente'")
+            just = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM incidencias WHERE estado='Pendiente'")
+            inc = cur.fetchone()[0]
         items = []
         if alumnos: items.append((f"{alumnos} alumnos con alertas", "Revisar faltas o retardos.", self.RED_SOFT, "Módulo de Alertas"))
         if just: items.append((f"{just} justificantes pendientes", "Validar documentos.", self.LAVENDER, "Módulo de Alertas"))
@@ -796,9 +929,13 @@ class PanelDireccion:
         self.resumen_alertas(summary)
         box = self.seccion(self.contenido, "Alumnos que requieren seguimiento")
         box.pack(fill="both", padx=14, pady=6)
-        with self.conectar() as db:
-            rows = db.execute("SELECT id,nombre,grupo,retardos,faltas FROM alumnos WHERE faltas>=? OR retardos>=? ORDER BY faltas DESC,retardos DESC",
-                              (UMBRAL_FALTAS, UMBRAL_FALTAS)).fetchall()
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute(
+                "SELECT id, nombre, grupo, retardos, faltas FROM alumnos WHERE faltas >= %s OR retardos >= %s ORDER BY faltas DESC, retardos DESC",
+                (UMBRAL_FALTAS, UMBRAL_FALTAS)
+            )
+            rows = cur.fetchall()
         filas = [(i,n,g,r,f, "Faltas" if f >= UMBRAL_FALTAS else "Retardos") for i,n,g,r,f in rows]
         table = self.crear_tabla(box, ("ID","Alumno","Grupo","Retardos","Faltas","Motivo"), filas, {"Alumno":150,"Motivo":110}, 5)
         table.tag_configure("falta", background=self.RED_SOFT)
@@ -816,30 +953,39 @@ class PanelDireccion:
         self.boton(actions, "Incidencia", lambda: self._incidencia_tabla(selected()), self.GOLD, self.WHITE).pack(side="left")
         incbox = self.seccion(self.contenido, "Historial de incidencias")
         incbox.pack(fill="both", padx=14, pady=4)
-        with self.conectar() as db:
-            incs = db.execute("""SELECT i.id,i.fecha,a.nombre,i.tipo,i.descripcion,i.estado
-                                  FROM incidencias i JOIN alumnos a ON a.id=i.alumno_id ORDER BY i.id DESC""").fetchall()
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("""
+                SELECT i.id, i.fecha, a.nombre, i.tipo, i.descripcion, i.estado
+                FROM incidencias i JOIN alumnos a ON a.id = i.alumno_id
+                ORDER BY i.id DESC
+            """)
+            incs = cur.fetchall()
         itable = self.crear_tabla(incbox, ("ID","Fecha","Alumno","Tipo","Descripción","Estado"), incs, {"Alumno":120,"Tipo":100,"Descripción":160}, 4)
         def cerrar():
             if not itable.selection():
                 messagebox.showwarning("Selecciona", "Selecciona un registro.")
                 return
             ident = itable.item(itable.selection()[0], "values")[0]
-            with self.conectar() as db:
-                db.execute("UPDATE incidencias SET estado='Atendida' WHERE id=?", (ident,))
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("UPDATE incidencias SET estado='Atendida' WHERE id=%s", (ident,))
+                db.commit()
             self.mostrar(pagina)
         self.boton(incbox, "Marcar atendida", cerrar, self.GREEN_SOFT, self.NAVY).pack(anchor="w", pady=(4, 0))
 
     def _seguimiento_tabla(self, alumno):
         if alumno: self.registrar_seguimiento(int(alumno[0]), alumno[1])
-# Mario Ian Tovar Alva
+
     def _incidencia_tabla(self, alumno):
         if not alumno: return
         datos = self.formulario_modal("Registrar incidencia", [("Tipo", "", None), ("Descripción", "", None)])
         if not datos: return
-        with self.conectar() as db:
-            db.execute("INSERT INTO incidencias(alumno_id,fecha,tipo,descripcion) VALUES (?,?,?,?)",
-                       (int(alumno[0]), date.today().isoformat(), datos["Tipo"], datos["Descripción"]))
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("INSERT INTO incidencias (alumno_id, fecha, tipo, descripcion) VALUES (%s, %s, %s, %s)",
+                        (int(alumno[0]), date.today().isoformat(), datos["Tipo"], datos["Descripción"]))
+            db.commit()
         messagebox.showinfo("Registrado", "Incidencia guardada.")
         self.mostrar(self.pagina)
 
@@ -861,8 +1007,10 @@ class PanelDireccion:
 
         listing = self.seccion(self.contenido, "Eventos Registrados")
         listing.pack(fill="both", padx=14, pady=6)
-        with self.conectar() as db:
-            rows = db.execute("SELECT id,fecha,titulo FROM eventos ORDER BY fecha").fetchall()
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("SELECT id, fecha, titulo FROM eventos ORDER BY fecha")
+            rows = cur.fetchall()
         table = self.crear_tabla(listing, ("ID", "Fecha", "Evento"), rows, {"Evento": 200}, 5)
         actions = tk.Frame(listing, bg=self.WHITE)
         actions.pack(fill="x", pady=(6, 0))
@@ -876,8 +1024,11 @@ class PanelDireccion:
         except ValueError:
             messagebox.showwarning("Formato", "Usa el formato AAAA-MM-DD.")
             return
-        with self.conectar() as db:
-            db.execute("INSERT INTO eventos(fecha,titulo) VALUES (?,?)", (datos["Fecha (AAAA-MM-DD)"], datos["Nombre del evento"]))
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("INSERT INTO eventos (fecha, titulo) VALUES (%s, %s)",
+                        (datos["Fecha (AAAA-MM-DD)"], datos["Nombre del evento"]))
+            db.commit()
         self.mostrar("Calendario Oficial")
 
     def editar_evento(self, table):
@@ -885,14 +1036,17 @@ class PanelDireccion:
             messagebox.showwarning("Selecciona", "Selecciona un evento.")
             return
         fila = table.item(table.selection()[0], "values")
-        datos = self.formulario_modal("Editar evento", [("Fecha (AAAA-MM-DD)", fila[1], None), ("Nombre del evento", fila[2], None)])
+        datos = self.formulario_modal("Editar evento", [("Fecha (AAAA-MM-DD)", str(fila[1]), None), ("Nombre del evento", fila[2], None)])
         if not datos: return
         try: datetime.strptime(datos["Fecha (AAAA-MM-DD)"], "%Y-%m-%d")
         except ValueError:
             messagebox.showwarning("Formato", "Usa el formato AAAA-MM-DD.")
             return
-        with self.conectar() as db:
-            db.execute("UPDATE eventos SET fecha=?, titulo=? WHERE id=?", (datos["Fecha (AAAA-MM-DD)"], datos["Nombre del evento"], fila[0]))
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("UPDATE eventos SET fecha=%s, titulo=%s WHERE id=%s",
+                        (datos["Fecha (AAAA-MM-DD)"], datos["Nombre del evento"], fila[0]))
+            db.commit()
         self.mostrar("Calendario Oficial")
 
     def eliminar_evento(self, table):
@@ -901,8 +1055,10 @@ class PanelDireccion:
             return
         ident = table.item(table.selection()[0], "values")[0]
         if messagebox.askyesno("Eliminar", "¿Deseas eliminar el evento?"):
-            with self.conectar() as db:
-                db.execute("DELETE FROM eventos WHERE id=?", (ident,))
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("DELETE FROM eventos WHERE id=%s", (ident,))
+                db.commit()
             self.mostrar("Calendario Oficial")
 
     def pagina_reportes(self):
@@ -921,16 +1077,20 @@ class PanelDireccion:
     def exportar_csv(self):
         try:
             ruta = os.path.join(BASE_DIR, "reporte_asistencia.csv")
-            with self.conectar() as db:
-                rows = db.execute("""SELECT a.fecha,al.id,al.nombre,al.grupo,a.estado
-                                     FROM asistencias a JOIN alumnos al ON al.id=a.alumno_id
-                                     ORDER BY a.fecha DESC""").fetchall()
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("""
+                    SELECT a.fecha, al.id, al.nombre, al.grupo, a.estado
+                    FROM asistencias a JOIN alumnos al ON al.id = a.alumno_id
+                    ORDER BY a.fecha DESC
+                """)
+                rows = cur.fetchall()
             with open(ruta, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
                 writer.writerow(["Fecha", "ID alumno", "Nombre", "Grupo", "Estado"])
                 writer.writerows(rows)
             messagebox.showinfo("Exportado", f"Guardado en:\n{ruta}")
-        except OSError as e: messagebox.showerror("Error", str(e))
+        except (OSError, MySQLError) as e: messagebox.showerror("Error", str(e))
 
     def exportar_alumnos(self):
         try:
@@ -940,7 +1100,7 @@ class PanelDireccion:
                 writer.writerow(["ID", "Nombre", "Grupo", "Retardos", "Faltas"])
                 writer.writerows(self.obtener_alumnos())
             messagebox.showinfo("Exportado", f"Guardado en:\n{ruta}")
-        except OSError as e: messagebox.showerror("Error", str(e))
+        except (OSError, MySQLError) as e: messagebox.showerror("Error", str(e))
 
     def pagina_configuracion(self):
         box = self.seccion(self.contenido, "Preferencias y reglas del sistema")
@@ -949,8 +1109,8 @@ class PanelDireccion:
         tk.Label(box, text="Regla de asistencia", bg=self.WHITE, fg=fg_c, font=("Arial", 8, "bold")).pack(anchor="w")
         tk.Label(box, text="3 retardos equivalen a 1 falta. Alertas automáticas al llegar a 3 faltas.",
                  bg=self.BLUE_SOFT, fg=fg_c, padx=8, pady=8, justify="left", wraplength=280).pack(fill="x", pady=(3, 8))
-        tk.Label(box, text="Base de datos local", bg=self.WHITE, fg=fg_c, font=("Arial", 8, "bold")).pack(anchor="w")
-        tk.Label(box, text=DB_PATH, bg=self.WHITE, fg=self.MUTED, wraplength=280, justify="left").pack(anchor="w", pady=(2, 8))
+        tk.Label(box, text="Base de datos principal MySQL", bg=self.WHITE, fg=fg_c, font=("Arial", 8, "bold")).pack(anchor="w")
+        tk.Label(box, text=f"{MYSQL_CONFIG['host']}:{MYSQL_CONFIG['port']} / {DB_NOMBRE}", bg=self.WHITE, fg=self.MUTED, wraplength=280, justify="left").pack(anchor="w", pady=(2, 8))
         self.boton(box, "Volver al inicio", lambda: self.mostrar("Inicio"), self.GOLD, self.WHITE).pack(fill="x", pady=(8, 0))
 
 
@@ -968,6 +1128,7 @@ class PanelDocente:
         self.pagina = "Mis Alumnos"
         self.compacto = False
         self._resize_job = None
+        inicializar_base_datos_principal()
         self.obtener_grupos_docente()
         self.configurar_estilos()
         self.root.bind("<Configure>", self.detectar_tamano)
@@ -1002,20 +1163,22 @@ class PanelDocente:
         self.configurar_estilos()
         self.crear_panel(self.pagina)
 
-    def conectar(self):
-        db = sqlite3.connect(DB_PATH)
-        db.execute("PRAGMA foreign_keys = ON")
-        return db
+    def conectar(self, incluir_bd=True):
+        return conectar_mysql(incluir_bd=incluir_bd)
 
     def obtener_grupos_docente(self):
-        with self.conectar() as db:
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
             if self.docente_nombre.lower() in ("docente", "todos"):
-                self.grupos = [row[0] for row in db.execute("SELECT grupo FROM grupos").fetchall()]
+                cur.execute("SELECT grupo FROM grupos")
             else:
-                self.grupos = [row[0] for row in db.execute("SELECT grupo FROM grupos WHERE docente LIKE ?", (f"%{self.docente_nombre}%",)).fetchall()]
+                cur.execute("SELECT grupo FROM grupos WHERE LOWER(docente) LIKE LOWER(%s)", (f"%{self.docente_nombre}%",))
+            self.grupos = [row[0] for row in cur.fetchall()]
         if not self.grupos:
-            with self.conectar() as db:
-                self.grupos = [row[0] for row in db.execute("SELECT grupo FROM grupos").fetchall()[:1]]
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("SELECT grupo FROM grupos LIMIT 1")
+                self.grupos = [row[0] for row in cur.fetchall()]
 
     def configurar_estilos(self):
         s = ttk.Style()
@@ -1148,7 +1311,6 @@ class PanelDocente:
         else:
             tk.Label(self.menu, text="MENÚ DOCENTE", bg=self.NAVY, fg=self.TEAL, font=("Arial", 9, "bold"), anchor="w").pack(fill="x", padx=12, pady=(10, 4))
 
-        # SE RESTAURARON ALUMNOS, ASISTENCIA Y JUSTIFICANTES; SE QUITARON TAREAS, CALIFICACIONES Y MATERIAL DIDÁCTICO
         nav = [
             ("♙", "Mis Alumnos", "ACADÉMICO"),
             ("✓", "Asistencia", ""),
@@ -1241,10 +1403,15 @@ class PanelDocente:
         rutas.get(pagina, self.pagina_mis_alumnos)()
 
     def obtener_alumnos_docente(self):
-        with self.conectar() as db:
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
             if not self.grupos: return []
-            placeholders = ",".join(["?"] * len(self.grupos))
-            return db.execute(f"SELECT id, nombre, grupo, retardos, faltas FROM alumnos WHERE grupo IN ({placeholders}) ORDER BY grupo, nombre", self.grupos).fetchall()
+            placeholders = ",".join(["%s"] * len(self.grupos))
+            cur.execute(
+                f"SELECT id, nombre, grupo, retardos, faltas FROM alumnos WHERE grupo IN ({placeholders}) ORDER BY grupo, nombre",
+                tuple(self.grupos)
+            )
+            return cur.fetchall()
 
     def pagina_mis_alumnos(self):
         box = self.seccion(self.contenido, f"Alumnos: {', '.join(self.grupos)}")
@@ -1276,8 +1443,11 @@ class PanelDocente:
         datos = self.formulario_modal("Registrar seguimiento", [(f"Nota para {nombre}", "", None)])
         if not datos: return
         nota = datos[f"Nota para {nombre}"]
-        with self.conectar() as db:
-            db.execute("INSERT INTO seguimientos(alumno_id,fecha,nota) VALUES (?,?,?)", (alumno_id, date.today().isoformat(), nota))
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("INSERT INTO seguimientos (alumno_id, fecha, nota) VALUES (%s, %s, %s)",
+                        (alumno_id, date.today().isoformat(), nota))
+            db.commit()
         messagebox.showinfo("Guardado", "Nota registrada correctamente.")
         self.mostrar("Mis Alumnos")
 
@@ -1305,30 +1475,40 @@ class PanelDocente:
             hoy = date.today().isoformat()
             estado = estado_var.get()
             try:
-                with self.conectar() as db:
-                    if db.execute("SELECT 1 FROM asistencias WHERE alumno_id=? AND fecha=?", (alumno_id, hoy)).fetchone():
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute("SELECT 1 FROM asistencias WHERE alumno_id=%s AND fecha=%s", (alumno_id, hoy))
+                    if cur.fetchone():
                         messagebox.showwarning("Aviso", "Ya hay asistencia registrada para este alumno hoy.")
                         return
-                    db.execute("INSERT INTO asistencias(alumno_id,fecha,estado) VALUES (?,?,?)", (alumno_id, hoy, estado))
+                    cur.execute("INSERT INTO asistencias (alumno_id, fecha, estado) VALUES (%s, %s, %s)",
+                                (alumno_id, hoy, estado))
                     if estado == "Retardo":
-                        db.execute("UPDATE alumnos SET retardos=retardos+1 WHERE id=?", (alumno_id,))
-                        r = db.execute("SELECT retardos FROM alumnos WHERE id=?", (alumno_id,)).fetchone()[0]
+                        cur.execute("UPDATE alumnos SET retardos = retardos + 1 WHERE id=%s", (alumno_id,))
+                        cur.execute("SELECT retardos FROM alumnos WHERE id=%s", (alumno_id,))
+                        r = cur.fetchone()[0]
                         if r % UMBRAL_FALTAS == 0:
-                            db.execute("UPDATE alumnos SET faltas=faltas+1 WHERE id=?", (alumno_id,))
+                            cur.execute("UPDATE alumnos SET faltas = faltas + 1 WHERE id=%s", (alumno_id,))
                     elif estado == "Falta":
-                        db.execute("UPDATE alumnos SET faltas=faltas+1 WHERE id=?", (alumno_id,))
+                        cur.execute("UPDATE alumnos SET faltas = faltas + 1 WHERE id=%s", (alumno_id,))
+                    db.commit()
                 messagebox.showinfo("Guardado", "Asistencia registrada correctamente.")
                 self.mostrar("Asistencia")
-            except sqlite3.Error as e:
+            except MySQLError as e:
                 messagebox.showerror("Error", str(e))
         self.boton(box, "Guardar asistencia", guardar, self.GOLD, self.WHITE).pack(fill="x", pady=(3, 0))
         hist = self.seccion(self.contenido, "Historial reciente de asistencia")
         hist.pack(fill="both", padx=14, pady=6)
-        with self.conectar() as db:
-            placeholders = ",".join(["?"] * len(self.grupos)) if self.grupos else "''"
-            rows = db.execute(f"""SELECT a.fecha, al.nombre, al.grupo, a.estado FROM asistencias a
-                                 JOIN alumnos al ON al.id = a.alumno_id
-                                 WHERE al.grupo IN ({placeholders}) ORDER BY a.id DESC LIMIT 40""", self.grupos).fetchall()
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            placeholders = ",".join(["%s"] * len(self.grupos)) if self.grupos else "'__NONE__'"
+            cur.execute(f"""
+                SELECT a.fecha, al.nombre, al.grupo, a.estado
+                FROM asistencias a JOIN alumnos al ON al.id = a.alumno_id
+                WHERE al.grupo IN ({placeholders})
+                ORDER BY a.id DESC LIMIT 40
+            """, tuple(self.grupos))
+            rows = cur.fetchall()
         self.crear_tabla(hist, ("Fecha", "Alumno", "Grupo", "Estado"), rows, {"Alumno": 180}, 6)
 
     def pagina_justificantes(self):
@@ -1345,9 +1525,11 @@ class PanelDocente:
             if not datos: return
             nombre_al = datos["Nombre del alumno"]
             grupo_al = next((a[2] for a in alumnos if a[1] == nombre_al), self.grupos[0])
-            with self.conectar() as db:
-                db.execute("INSERT INTO justificantes(alumno, grupo, fecha, motivo) VALUES (?,?,?,?)",
-                           (nombre_al, grupo_al, date.today().isoformat(), datos["Motivo"]))
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("INSERT INTO justificantes (alumno, grupo, fecha, motivo) VALUES (%s, %s, %s, %s)",
+                            (nombre_al, grupo_al, date.today().isoformat(), datos["Motivo"]))
+                db.commit()
             messagebox.showinfo("Guardado", "Justificante registrado.")
             self.mostrar("Justificantes")
 
@@ -1355,9 +1537,14 @@ class PanelDocente:
 
         listing = self.seccion(self.contenido, "Justificantes de tus grupos")
         listing.pack(fill="both", padx=14, pady=6)
-        with self.conectar() as db:
-            placeholders = ",".join(["?"] * len(self.grupos)) if self.grupos else "''"
-            rows = db.execute(f"SELECT id, alumno, grupo, fecha, motivo, estado FROM justificantes WHERE grupo IN ({placeholders}) ORDER BY id DESC", self.grupos).fetchall()
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            placeholders = ",".join(["%s"] * len(self.grupos)) if self.grupos else "'__NONE__'"
+            cur.execute(
+                f"SELECT id, alumno, grupo, fecha, motivo, estado FROM justificantes WHERE grupo IN ({placeholders}) ORDER BY id DESC",
+                tuple(self.grupos)
+            )
+            rows = cur.fetchall()
         self.crear_tabla(listing, ("ID", "Alumno", "Grupo", "Fecha", "Motivo", "Estado"), rows, {"Alumno": 140, "Motivo": 180}, 6)
 
     def pagina_horario(self):
@@ -1383,9 +1570,11 @@ class PanelDocente:
         def enviar_mensaje():
             datos = self.formulario_modal("Nuevo Mensaje", [("Asunto", "", None), ("Mensaje", "", None)])
             if not datos: return
-            with self.conectar() as db:
-                db.execute("INSERT INTO mensajes_docente(docente, fecha, asunto, mensaje) VALUES (?,?,?,?)",
-                           (self.docente_nombre, date.today().isoformat(), datos["Asunto"], datos["Mensaje"]))
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("INSERT INTO mensajes_docente (docente, fecha, asunto, mensaje) VALUES (%s, %s, %s, %s)",
+                            (self.docente_nombre, date.today().isoformat(), datos["Asunto"], datos["Mensaje"]))
+                db.commit()
             messagebox.showinfo("Enviado", "Mensaje enviado a la dirección correctamente.")
             self.mostrar("Mensajes a Dirección")
 
@@ -1393,8 +1582,10 @@ class PanelDocente:
 
         listing = self.seccion(self.contenido, "Historial de Mensajes Enviados")
         listing.pack(fill="both", padx=14, pady=6)
-        with self.conectar() as db:
-            rows = db.execute("SELECT fecha, asunto, mensaje FROM mensajes_docente WHERE docente=? ORDER BY id DESC", (self.docente_nombre,)).fetchall()
+        with self.conectar(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("SELECT fecha, asunto, mensaje FROM mensajes_docente WHERE docente=%s ORDER BY id DESC", (self.docente_nombre,))
+            rows = cur.fetchall()
         if not rows:
             rows = [("2026-10-28", "Solicitud de material deportivo", "Requerimos balones para la clase de educación física.")]
         self.crear_tabla(listing, ("Fecha", "Asunto", "Mensaje"), rows, {"Asunto": 160, "Mensaje": 260}, 5)
@@ -1427,9 +1618,11 @@ class PanelDocente:
             if not tipo or not desc:
                 messagebox.showwarning("Incompletos", "Completa todos los campos.")
                 return
-            with self.conectar() as db:
-                db.execute("INSERT INTO incidencias(alumno_id, fecha, tipo, descripcion, estado) VALUES (?,?,?,?, 'Pendiente')",
-                           (alumno_id, date.today().isoformat(), tipo, desc))
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("INSERT INTO incidencias (alumno_id, fecha, tipo, descripcion, estado) VALUES (%s, %s, %s, %s, 'Pendiente')",
+                            (alumno_id, date.today().isoformat(), tipo, desc))
+                db.commit()
             messagebox.showinfo("Enviado", "Incidencia reportada a dirección.")
             self.mostrar("Reportar Incidencia")
 
@@ -1437,7 +1630,7 @@ class PanelDocente:
 
     def pagina_resumen_grupo(self):
         box = self.seccion(self.contenido, "Estadísticas y Gráfica del Grupo")
-        box.pack(fill="fill", padx=14, pady=4)
+        box.pack(fill="both", padx=14, pady=4)
         alumnos = self.obtener_alumnos_docente()
         total = len(alumnos)
         con_faltas = sum(1 for a in alumnos if a[4] >= UMBRAL_FALTAS)
