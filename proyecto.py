@@ -1,18 +1,19 @@
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, colorchooser
 import mysql.connector
 from mysql.connector import Error as MySQLError, IntegrityError
 import os
 import sys
 import csv
 import io
+import json
 from datetime import date, datetime
 import calendar
 
 # ==========================================================
 # PRIMARIA NEZAHUALCÓYOTL | PANEL DE DIRECCIÓN Y DOCENTE
-# Base de datos principal en MySQL (INT y VARCHAR)
+# Base de datos principal en MySQL (INT y VARCHAR + JSON)
 # ==========================================================
 
 MYSQL_CONFIG = {
@@ -70,6 +71,54 @@ TEMAS = {
         "TEXT_NAV": "#F9FAFB",
         "TEXT_MAIN": "#F9FAFB",
         "TEXT_SOFT": "#F9FAFB",
+    }
+}
+
+PALETAS_USUARIO = {
+    "Azul institucional": {
+        "BG": "#F1F5F9", "WHITE": "#FFFFFF", "NAVY": "#0D3B66",
+        "DARK": "#1E293B", "PURPLE": "#1565C0", "GOLD": "#059669",
+        "LAVENDER": "#E3F2FD", "MUTED": "#64748B", "BORDER": "#CBD5E1",
+        "BLUE_SOFT": "#DBEAFE", "GREEN_SOFT": "#DCFCE7",
+        "YELLOW_SOFT": "#FEF9C3", "RED_SOFT": "#FEE2E2",
+        "RED": "#DC2626", "RED_DARK": "#991B1B", "TEAL": "#0284C7",
+        "TEXT_NAV": "#F8FAFC", "TEXT_MAIN": "#1E293B", "TEXT_SOFT": "#1E293B",
+    },
+    "Verde": {
+        "BG": "#F0FDF4", "WHITE": "#FFFFFF", "NAVY": "#14532D",
+        "DARK": "#166534", "PURPLE": "#16A34A", "GOLD": "#0D9488",
+        "LAVENDER": "#DCFCE7", "MUTED": "#4B5563", "BORDER": "#BBF7D0",
+        "BLUE_SOFT": "#D1FAE5", "GREEN_SOFT": "#DCFCE7",
+        "YELLOW_SOFT": "#FEF9C3", "RED_SOFT": "#FEE2E2",
+        "RED": "#DC2626", "RED_DARK": "#991B1B", "TEAL": "#059669",
+        "TEXT_NAV": "#F0FDF4", "TEXT_MAIN": "#14532D", "TEXT_SOFT": "#14532D",
+    },
+    "Morado": {
+        "BG": "#F5F3FF", "WHITE": "#FFFFFF", "NAVY": "#4C1D95",
+        "DARK": "#5B21B6", "PURPLE": "#7C3AED", "GOLD": "#059669",
+        "LAVENDER": "#EDE9FE", "MUTED": "#6B7280", "BORDER": "#DDD6FE",
+        "BLUE_SOFT": "#EDE9FE", "GREEN_SOFT": "#DCFCE7",
+        "YELLOW_SOFT": "#FEF9C3", "RED_SOFT": "#FEE2E2",
+        "RED": "#DC2626", "RED_DARK": "#991B1B", "TEAL": "#6366F1",
+        "TEXT_NAV": "#F5F3FF", "TEXT_MAIN": "#2E1065", "TEXT_SOFT": "#2E1065",
+    },
+    "Rojo": {
+        "BG": "#FEF2F2", "WHITE": "#FFFFFF", "NAVY": "#7F1D1D",
+        "DARK": "#991B1B", "PURPLE": "#DC2626", "GOLD": "#059669",
+        "LAVENDER": "#FEE2E2", "MUTED": "#6B7280", "BORDER": "#FECACA",
+        "BLUE_SOFT": "#FEE2E2", "GREEN_SOFT": "#DCFCE7",
+        "YELLOW_SOFT": "#FEF9C3", "RED_SOFT": "#FEE2E2",
+        "RED": "#B91C1C", "RED_DARK": "#7F1D1D", "TEAL": "#EA580C",
+        "TEXT_NAV": "#FEF2F2", "TEXT_MAIN": "#450A0A", "TEXT_SOFT": "#450A0A",
+    },
+    "Oscuro": {
+        "BG": "#111827", "WHITE": "#1F2937", "NAVY": "#030712",
+        "DARK": "#1F2937", "PURPLE": "#2563EB", "GOLD": "#10B981",
+        "LAVENDER": "#1F2937", "MUTED": "#9CA3AF", "BORDER": "#374151",
+        "BLUE_SOFT": "#1E3A8A", "GREEN_SOFT": "#064E3B",
+        "YELLOW_SOFT": "#422006", "RED_SOFT": "#450A0A",
+        "RED": "#F87171", "RED_DARK": "#EF4444", "TEAL": "#38BDF8",
+        "TEXT_NAV": "#F9FAFB", "TEXT_MAIN": "#F9FAFB", "TEXT_SOFT": "#F9FAFB",
     }
 }
 
@@ -292,6 +341,13 @@ def inicializar_base_datos_principal():
                     asunto VARCHAR(160) NOT NULL,
                     mensaje VARCHAR(500) NOT NULL
                 ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS preferencias_usuario (
+                    usuario VARCHAR(100) PRIMARY KEY,
+                    colores JSON NOT NULL,
+                    actualizado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB;
             """)
             cur.executemany(
                 "INSERT IGNORE INTO metricas (nombre, valor) VALUES (%s, %s)",
@@ -317,6 +373,170 @@ def inicializar_base_datos_principal():
             db.commit()
     except MySQLError as e:
         messagebox.showerror("Error de conexión MySQL", f"No se pudo inicializar {DB_NOMBRE}:\n{e}")
+
+
+def cargar_preferencia_usuario_mysql(usuario):
+    """Carga un diccionario de colores guardado en MySQL para el usuario, o None si no existe."""
+    if not usuario:
+        return None
+    try:
+        with conectar_mysql(incluir_bd=True) as db:
+            cur = db.cursor(dictionary=True)
+            cur.execute(
+                "SELECT colores FROM preferencias_usuario WHERE usuario=%s",
+                (usuario.strip(),)
+            )
+            fila = cur.fetchone()
+            if fila and fila.get("colores"):
+                raw = fila["colores"]
+                datos = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+                if isinstance(datos, dict):
+                    return datos
+                if isinstance(datos, list) and len(datos) == 6:
+                    fondo, oscuro, acento, seleccion, texto, blanco = datos
+                    return {
+                        "BG": fondo,
+                        "NAVY": oscuro,
+                        "DARK": oscuro,
+                        "PURPLE": acento,
+                        "LAVENDER": seleccion,
+                        "TEXT_MAIN": texto,
+                        "TEXT_SOFT": texto,
+                        "WHITE": blanco,
+                    }
+    except (MySQLError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def guardar_preferencia_usuario_mysql(usuario, colores_dict):
+    """Guarda o actualiza los colores personalizados del usuario en MySQL."""
+    if not usuario:
+        return False
+    try:
+        with conectar_mysql(incluir_bd=True) as db:
+            cur = db.cursor()
+            cur.execute("""
+                INSERT INTO preferencias_usuario (usuario, colores)
+                VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE colores=VALUES(colores)
+            """, (usuario.strip(), json.dumps(colores_dict)))
+            db.commit()
+            return True
+    except MySQLError as e:
+        messagebox.showerror("Error al guardar colores", f"No se pudo guardar en MySQL:\n{e}")
+        return False
+
+
+def construir_bloque_personalizacion_colores(app, parent, usuario_clave, al_guardar_callback):
+    """Crea un panel de personalización de colores (presets + selector individual + vista previa + MySQL)."""
+    campos_colores = [
+        ("Fondo general", "BG"),
+        ("Barra superior y menú", "NAVY"),
+        ("Botones y acentos", "PURPLE"),
+        ("Opción seleccionada", "LAVENDER"),
+        ("Texto principal", "TEXT_MAIN"),
+        ("Tarjetas y paneles", "WHITE"),
+    ]
+
+    valores = {clave: getattr(app, clave) for _, clave in campos_colores}
+    muestras = {}
+
+    tk.Label(
+        parent, text=f"Tema personalizado para: {usuario_clave}",
+        bg=app.WHITE, fg=app.PURPLE, font=("Segoe UI", 10, "bold")
+    ).pack(anchor="w", pady=(0, 8))
+
+    fila_preset = tk.Frame(parent, bg=app.WHITE)
+    fila_preset.pack(fill="x", pady=(0, 10))
+    tk.Label(
+        fila_preset, text="Tema prediseñado:", bg=app.WHITE, fg=app.TEXT_MAIN,
+        font=("Segoe UI", 9, "bold")
+    ).pack(side="left", padx=(0, 8))
+
+    combo_tema = ttk.Combobox(
+        fila_preset, values=list(PALETAS_USUARIO.keys()), state="readonly", width=24
+    )
+    combo_tema.set("Azul institucional")
+    combo_tema.pack(side="left", padx=(0, 8))
+
+    vista_previa = tk.Frame(
+        parent, bg=valores["WHITE"], padx=14, pady=12,
+        highlightthickness=1, highlightbackground=app.BORDER
+    )
+    lbl_vp_titulo = tk.Label(
+        vista_previa, text="Vista previa del tema",
+        bg=valores["WHITE"], fg=valores["TEXT_MAIN"], font=("Segoe UI", 10, "bold")
+    )
+    lbl_vp_titulo.pack(anchor="w")
+    lbl_vp_btn = tk.Label(
+        vista_previa, text="Botón y acento de ejemplo",
+        bg=valores["PURPLE"], fg="#FFFFFF", padx=12, pady=6, font=("Segoe UI", 8, "bold")
+    )
+    lbl_vp_btn.pack(anchor="w", pady=(6, 0))
+
+    def refrescar_muestras_y_previa():
+        for _, k in campos_colores:
+            col = valores[k]
+            muestras[k].configure(text=col, bg=col)
+        vista_previa.configure(bg=valores["WHITE"], highlightbackground=valores["PURPLE"])
+        lbl_vp_titulo.configure(bg=valores["WHITE"], fg=valores["TEXT_MAIN"])
+        lbl_vp_btn.configure(bg=valores["PURPLE"], fg="#FFFFFF")
+
+    def aplicar_preset():
+        paleta = PALETAS_USUARIO.get(combo_tema.get())
+        if not paleta:
+            return
+        for k, v in paleta.items():
+            if k in valores:
+                valores[k] = v
+        refrescar_muestras_y_previa()
+
+    app.boton(fila_preset, "Cargar tema", aplicar_preset, app.PURPLE, "#FFFFFF", True).pack(side="left")
+
+    for etiqueta, clave in campos_colores:
+        fila = tk.Frame(parent, bg=app.WHITE)
+        fila.pack(fill="x", pady=3)
+        tk.Label(
+            fila, text=etiqueta, bg=app.WHITE, fg=app.TEXT_MAIN,
+            font=("Segoe UI", 9), width=24, anchor="w"
+        ).pack(side="left")
+
+        muestra = tk.Label(
+            fila, text=valores[clave], bg=valores[clave],
+            fg=app.TEXT_SOFT, width=12, relief="solid", bd=1, font=("Segoe UI", 8, "bold")
+        )
+        muestra.pack(side="right", padx=(8, 0))
+        muestras[clave] = muestra
+
+        def _elegir(k=clave):
+            elegido = colorchooser.askcolor(color=valores[k], title=f"Elegir color · {k}")
+            if elegido and elegido[1]:
+                valores[k] = elegido[1]
+                refrescar_muestras_y_previa()
+
+        app.boton(fila, "Elegir", _elegir, app.DARK, app.TEXT_NAV, True).pack(side="right")
+
+    vista_previa.pack(fill="x", pady=(10, 10))
+
+    def guardar_y_aplicar():
+        if guardar_preferencia_usuario_mysql(usuario_clave, valores):
+            al_guardar_callback(valores)
+            messagebox.showinfo("Tema guardado", f"Colores guardados en MySQL para '{usuario_clave}'.")
+
+    def restablecer_predeterminado():
+        base = TEMAS["oscuro"] if app.modo_oscuro else TEMAS["claro"]
+        for k in valores:
+            if k in base:
+                valores[k] = base[k]
+        refrescar_muestras_y_previa()
+        if guardar_preferencia_usuario_mysql(usuario_clave, valores):
+            al_guardar_callback(valores)
+
+    barra_btn = tk.Frame(parent, bg=app.WHITE)
+    barra_btn.pack(fill="x")
+    app.boton(barra_btn, "Guardar y aplicar colores", guardar_y_aplicar, app.GOLD, "#FFFFFF", True).pack(side="left", padx=(0, 8))
+    app.boton(barra_btn, "Restablecer por defecto", restablecer_predeterminado, app.BG, app.TEXT_MAIN, True).pack(side="left")
 
 
 def parsear_filas_masivas(texto_csv, encabezados_esperados):
@@ -478,9 +698,10 @@ def abrir_ventana_notificaciones(app, alumnos_lista, just_pendientes=0, inc_pend
 
 
 class PanelDireccion:
-    def __init__(self, root, modo_oscuro=False):
+    def __init__(self, root, modo_oscuro=False, colores_personalizados=None):
         self.root = root
         self.modo_oscuro = modo_oscuro
+        self.colores_personalizados = colores_personalizados
         self.actualizar_colores()
 
         hoy_dt = date.today()
@@ -500,15 +721,17 @@ class PanelDireccion:
         self.pantalla_login()
 
     def actualizar_colores(self):
-        t = TEMAS["oscuro"] if self.modo_oscuro else TEMAS["claro"]
+        t = dict(TEMAS["oscuro"] if self.modo_oscuro else TEMAS["claro"])
+        if isinstance(self.colores_personalizados, dict):
+            t.update(self.colores_personalizados)
         self.BG = t["BG"]
         self.WHITE = t["WHITE"]
         self.NAVY = t["NAVY"]
         self.DARK = t["DARK"]
         self.PURPLE = t["PURPLE"]
         self.GOLD = t["GOLD"]
-        self.GOLD_LIGHT = t["GOLD_LIGHT"]
-        self.GOLD_DARK = t["GOLD_DARK"]
+        self.GOLD_LIGHT = t.get("GOLD_LIGHT", t["GREEN_SOFT"])
+        self.GOLD_DARK = t.get("GOLD_DARK", t["GOLD"])
         self.LAVENDER = t["LAVENDER"]
         self.MUTED = t["MUTED"]
         self.BORDER = t["BORDER"]
@@ -525,6 +748,7 @@ class PanelDireccion:
 
     def cambiar_tema(self):
         self.modo_oscuro = not self.modo_oscuro
+        self.colores_personalizados = None
         self.actualizar_colores()
         self.configurar_estilos()
         self.crear_panel(self.pagina)
@@ -718,6 +942,9 @@ class PanelDireccion:
             user = usuario.get().strip()
             passw = clave.get().strip()
             if user.lower() == "director" and passw == "1234":
+                self.colores_personalizados = cargar_preferencia_usuario_mysql("director")
+                self.actualizar_colores()
+                self.configurar_estilos()
                 self.crear_panel()
                 return
 
@@ -731,8 +958,12 @@ class PanelDireccion:
 
             if acceso_docente:
                 nombre_docente, grupo_asignado = acceso_docente
+                colores_doc = cargar_preferencia_usuario_mysql(nombre_docente)
                 self.limpiar_raiz()
-                PanelDocente(self.root, nombre_docente, self.modo_oscuro, grupo_fijo=grupo_asignado)
+                PanelDocente(
+                    self.root, nombre_docente, self.modo_oscuro,
+                    grupo_fijo=grupo_asignado, colores_personalizados=colores_doc
+                )
             else:
                 messagebox.showerror("Acceso denegado", "Usuario o contraseña incorrectos.")
 
@@ -742,6 +973,7 @@ class PanelDireccion:
 
     def cambiar_tema_login(self):
         self.modo_oscuro = not self.modo_oscuro
+        self.colores_personalizados = None
         self.actualizar_colores()
         self.configurar_estilos()
         self.pantalla_login()
@@ -1932,9 +2164,21 @@ class PanelDireccion:
         except (OSError, MySQLError) as e:
             messagebox.showerror("Error", str(e))
 
+    def _aplicar_colores_guardados_dir(self, nuevos_colores):
+        self.colores_personalizados = dict(nuevos_colores)
+        self.actualizar_colores()
+        self.configurar_estilos()
+        self.crear_panel("Configuración")
+
     def pagina_configuracion(self):
+        sec_col = self.seccion(self.contenido, "Personalización de colores por usuario (MySQL)")
+        sec_col.pack(fill="x", padx=18, pady=(14, 6))
+        construir_bloque_personalizacion_colores(
+            self, sec_col.body, "director", self._aplicar_colores_guardados_dir
+        )
+
         sec = self.seccion(self.contenido, "Preferencias y reglas del sistema")
-        sec.pack(fill="x", padx=18, pady=(14, 6))
+        sec.pack(fill="x", padx=18, pady=6)
         box = sec.body
         fg_c = self.TEXT_MAIN
         tk.Label(box, text="Regla de asistencia", bg=self.WHITE, fg=fg_c, font=("Segoe UI", 9, "bold")).pack(anchor="w")
@@ -1946,11 +2190,12 @@ class PanelDireccion:
 
 
 class PanelDocente:
-    def __init__(self, root, docente_nombre, modo_oscuro=False, grupo_fijo=None):
+    def __init__(self, root, docente_nombre, modo_oscuro=False, grupo_fijo=None, colores_personalizados=None):
         self.root = root
         self.docente_nombre = docente_nombre
         self.grupo_fijo = grupo_fijo
         self.modo_oscuro = modo_oscuro
+        self.colores_personalizados = colores_personalizados
         self.actualizar_colores()
 
         etiqueta_grupo = f" - Grupo {grupo_fijo}" if grupo_fijo else ""
@@ -1968,15 +2213,17 @@ class PanelDocente:
         self.crear_panel(self.pagina)
 
     def actualizar_colores(self):
-        t = TEMAS["oscuro"] if self.modo_oscuro else TEMAS["claro"]
+        t = dict(TEMAS["oscuro"] if self.modo_oscuro else TEMAS["claro"])
+        if isinstance(self.colores_personalizados, dict):
+            t.update(self.colores_personalizados)
         self.BG = t["BG"]
         self.WHITE = t["WHITE"]
         self.NAVY = t["NAVY"]
         self.DARK = t["DARK"]
         self.PURPLE = t["PURPLE"]
         self.GOLD = t["GOLD"]
-        self.GOLD_LIGHT = t["GOLD_LIGHT"]
-        self.GOLD_DARK = t["GOLD_DARK"]
+        self.GOLD_LIGHT = t.get("GOLD_LIGHT", t["GREEN_SOFT"])
+        self.GOLD_DARK = t.get("GOLD_DARK", t["GOLD"])
         self.LAVENDER = t["LAVENDER"]
         self.MUTED = t["MUTED"]
         self.BORDER = t["BORDER"]
@@ -1993,6 +2240,7 @@ class PanelDocente:
 
     def cambiar_tema(self):
         self.modo_oscuro = not self.modo_oscuro
+        self.colores_personalizados = None
         self.actualizar_colores()
         self.configurar_estilos()
         self.crear_panel(self.pagina)
@@ -2711,9 +2959,21 @@ class PanelDocente:
 
         self.boton(box, "Enviar a dirección", guardar, self.GOLD, "#FFFFFF").pack(anchor="w", pady=(4, 0))
 
+    def _aplicar_colores_guardados_doc(self, nuevos_colores):
+        self.colores_personalizados = dict(nuevos_colores)
+        self.actualizar_colores()
+        self.configurar_estilos()
+        self.crear_panel("Resumen del Grupo")
+
     def pagina_resumen_grupo(self):
+        sec_col = self.seccion(self.contenido, "Personalización de colores del docente (MySQL)")
+        sec_col.pack(fill="x", padx=18, pady=(14, 6))
+        construir_bloque_personalizacion_colores(
+            self, sec_col.body, self.docente_nombre, self._aplicar_colores_guardados_doc
+        )
+
         sec = self.seccion(self.contenido, "Estadísticas del Grupo")
-        sec.pack(fill="both", padx=18, pady=(14, 6))
+        sec.pack(fill="both", padx=18, pady=6)
         box = sec.body
         alumnos = self.obtener_alumnos_docente()
         total = len(alumnos)
