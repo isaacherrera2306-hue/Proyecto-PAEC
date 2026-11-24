@@ -252,6 +252,9 @@ def inicializar_base_datos_principal():
         with conectar_mysql(incluir_bd=True) as db:
             cur = db.cursor()
             _ejecutar_script_mysql(cur, """
+                CREATE DATABASE primaria_nezahualcoyotl_db;
+                USE primaria_nezahualcoyotl_db;
+
                 CREATE TABLE IF NOT EXISTS metricas (
                     nombre VARCHAR(50) PRIMARY KEY,
                     valor INT NOT NULL
