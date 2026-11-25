@@ -17,13 +17,13 @@ import calendar
 # ==========================================================
 
 MYSQL_CONFIG = {
-    "host": "localhost",
-    "user": "root",
-    "password": "",
-    "database": "primaria_nezahualcoyotl_db"
+    "host": os.environ.get("MYSQL_HOST", "localhost"),
+    "user": os.environ.get("MYSQL_USER", "root"),
+    "password": os.environ.get("MYSQL_PASSWORD", ""),
+    "database": os.environ.get("MYSQL_DATABASE", "primaria_nezahualcoyotl_db"),
 }
 
-DB_NOMBRE = "primaria_nezahualcoyotl_db"
+DB_NOMBRE = MYSQL_CONFIG["database"]
 
 TEMAS = {
     "claro": {
@@ -71,7 +71,7 @@ TEMAS = {
         "TEXT_NAV": "#F9FAFB",
         "TEXT_MAIN": "#F9FAFB",
         "TEXT_SOFT": "#F9FAFB",
-    }
+    },
 }
 
 PALETAS_USUARIO = {
@@ -119,19 +119,19 @@ PALETAS_USUARIO = {
         "YELLOW_SOFT": "#422006", "RED_SOFT": "#450A0A",
         "RED": "#F87171", "RED_DARK": "#EF4444", "TEAL": "#38BDF8",
         "TEXT_NAV": "#F9FAFB", "TEXT_MAIN": "#F9FAFB", "TEXT_SOFT": "#F9FAFB",
-    }
+    },
 }
 
 MESES_ES = [
     "", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
 ]
 
 DIAS_ES = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
 
 UMBRAL_FALTAS = 3
 
-if getattr(sys, 'frozen', False):
+if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     try:
@@ -184,41 +184,20 @@ def maximizar_ventana(root):
             pass
 
 
-def _normalizar_clave_grupo(grupo_txt):
-    return "".join(ch for ch in (grupo_txt or "").upper() if ch.isalnum())
-
-
 def validar_acceso_docente(cursor, usuario_ingresado, clave_ingresada):
-    """Valida docente + contraseña vinculada a su grupo (ej. Anabel / 5°A1234)."""
-    u_limpio = (usuario_ingresado or "").strip()
+    """Valida usuarios tipo 'docente 1', 'docente 2', etc. con contraseña '1234'."""
+    u_limpio = " ".join((usuario_ingresado or "").strip().lower().split())
     c_limpia = (clave_ingresada or "").strip()
-    if not u_limpio or not c_limpia:
+    if not u_limpio or c_limpia != "1234":
         return None
 
-    cursor.execute("SELECT grupo, docente FROM grupos")
+    cursor.execute("SELECT grupo, docente FROM grupos ORDER BY id ASC")
     grupos_rows = cursor.fetchall()
 
-    candidatos = []
-    for grupo_db, docente_db in grupos_rows:
-        doc_lower = (docente_db or "").strip().lower()
-        primer_nombre = doc_lower.split()[0] if doc_lower else ""
-        u_lower = u_limpio.lower()
-        if (
-            u_lower == doc_lower
-            or (primer_nombre and u_lower == primer_nombre)
-            or (primer_nombre and u_lower.startswith(primer_nombre + " "))
-        ):
-            candidatos.append((grupo_db, docente_db))
-
-    if not candidatos and u_limpio.lower() == "docente":
-        for grupo_db, docente_db in grupos_rows:
-            candidatos.append((grupo_db, docente_db))
-
-    for grupo_db, docente_db in candidatos:
-        grp_compacto = _normalizar_clave_grupo(grupo_db)
-        clave_grupo_esperada = f"{grp_compacto}1234"
-        if c_limpia == clave_grupo_esperada or c_limpia.upper() == clave_grupo_esperada or c_limpia == "1234":
-            return docente_db, grupo_db
+    for idx, (grupo_db, docente_db) in enumerate(grupos_rows, start=1):
+        if u_limpio in (f"docente {idx}", f"docente{idx}"):
+            usuario_etiqueta = f"docente {idx}"
+            return docente_db, grupo_db, usuario_etiqueta
 
     return None
 
@@ -239,6 +218,16 @@ def conectar_mysql(incluir_bd=True):
     return mysql.connector.connect(**cfg)
 
 
+def sincronizar_conteo_grupos(cursor):
+    """Actualiza grupos.alumnos según el número real de alumnos registrados en cada grupo."""
+    cursor.execute("SELECT id, grupo, alumnos FROM grupos")
+    for grp_id, nombre_grp, meta_actual in cursor.fetchall():
+        cursor.execute("SELECT COUNT(*) FROM alumnos WHERE grupo=%s", (nombre_grp,))
+        real_count = int(cursor.fetchone()[0] or 0)
+        if real_count > 0 or not meta_actual:
+            cursor.execute("UPDATE grupos SET alumnos=%s WHERE id=%s", (real_count, grp_id))
+
+
 def inicializar_base_datos_principal():
     try:
         with conectar_mysql(incluir_bd=False) as srv:
@@ -251,9 +240,9 @@ def inicializar_base_datos_principal():
 
         with conectar_mysql(incluir_bd=True) as db:
             cur = db.cursor()
-            _ejecutar_script_mysql(cur, """
-                CREATE DATABASE IF NOT EXISTS primaria_nezahualcoyotl_db;
-                USE primaria_nezahualcoyotl_db;
+            _ejecutar_script_mysql(cur, f"""
+                CREATE DATABASE IF NOT EXISTS {DB_NOMBRE};
+                USE {DB_NOMBRE};
 
                 CREATE TABLE IF NOT EXISTS metricas (
                     nombre VARCHAR(50) PRIMARY KEY,
@@ -354,25 +343,31 @@ def inicializar_base_datos_principal():
             """)
             cur.executemany(
                 "INSERT IGNORE INTO metricas (nombre, valor) VALUES (%s, %s)",
-                [("Alumnos", 420), ("Presentes", 0), ("Retardos", 0),
-                 ("Faltas", 0), ("Incidencias", 0)]
+                [
+                    ("Alumnos", 420),
+                    ("Presentes", 0),
+                    ("Retardos", 0),
+                    ("Faltas", 0),
+                    ("Incidencias", 0),
+                ],
             )
             for fila in GRUPOS_INICIALES:
                 cur.execute(
                     "INSERT IGNORE INTO grupos (grupo, docente, alumnos) VALUES (%s, %s, %s)",
-                    fila
+                    fila,
                 )
             cur.execute("SELECT COUNT(*) FROM alumnos")
             if cur.fetchone()[0] == 0:
                 cur.executemany(
                     "INSERT INTO alumnos (nombre, grupo, retardos, faltas) VALUES (%s, %s, %s, %s)",
-                    ALUMNOS_INICIALES
+                    ALUMNOS_INICIALES,
                 )
             else:
                 cur.executemany(
                     "INSERT IGNORE INTO alumnos (nombre, grupo, retardos, faltas) VALUES (%s, %s, %s, %s)",
-                    [a for a in ALUMNOS_INICIALES if a[1] == "5° A"]
+                    [a for a in ALUMNOS_INICIALES if a[1] == "5° A"],
                 )
+            sincronizar_conteo_grupos(cur)
             db.commit()
     except MySQLError as e:
         messagebox.showerror("Error de conexión MySQL", f"No se pudo inicializar {DB_NOMBRE}:\n{e}")
@@ -388,9 +383,9 @@ def obtener_rango_semana_actual(ref_fecha=None):
 
 def clasificar_alumnos_campanas(alumnos_lista, asistencias_semana=None):
     """Clasifica alumnos en:
-    - verde: solo tienen 1 falta (faltas == 1) en la semana
-    - amarillo: más de 2 retardos (retardos > 2) o 2 faltas (faltas == 2) en la semana
-    - rojo: más de 2 faltas (faltas > 2) o más de 2 retardos (retardos > 2) en una misma semana
+    - verde: 1 falta en la semana
+    - amarillo: 2 faltas o 2 retardos en la semana
+    - rojo: más de 2 faltas o más de 2 retardos en una misma semana
     """
     asistencias_semana = asistencias_semana or {}
     verde, amarillo, rojo = [], [], []
@@ -403,10 +398,10 @@ def clasificar_alumnos_campanas(alumnos_lista, asistencias_semana=None):
 
         if fal_sem > 2 or ret_sem > 2:
             rojo.append((ident, nombre, grupo, ret_sem, fal_sem, "Más de 2 faltas o retardos en la semana"))
-        elif ret_sem > 2 or fal_sem == 2:
-            amarillo.append((ident, nombre, grupo, ret_sem, fal_sem, "Más de 2 retardos o 2 faltas en la semana"))
+        elif fal_sem == 2 or ret_sem == 2:
+            amarillo.append((ident, nombre, grupo, ret_sem, fal_sem, "2 faltas o 2 retardos en la semana"))
         elif fal_sem == 1:
-            verde.append((ident, nombre, grupo, ret_sem, fal_sem, "Solo 1 falta en la semana"))
+            verde.append((ident, nombre, grupo, ret_sem, fal_sem, "1 falta en la semana"))
 
     return {"verde": verde, "amarillo": amarillo, "rojo": rojo}
 
@@ -424,7 +419,7 @@ def obtener_datos_campanas_mysql(grupos_filtro=None):
                 ph = ",".join(["%s"] * len(grupos_filtro))
                 cur.execute(
                     f"SELECT id, nombre, grupo, retardos, faltas FROM alumnos WHERE grupo IN ({ph}) ORDER BY grupo, nombre",
-                    tuple(grupos_filtro)
+                    tuple(grupos_filtro),
                 )
             else:
                 cur.execute("SELECT id, nombre, grupo, retardos, faltas FROM alumnos ORDER BY grupo, nombre")
@@ -442,7 +437,7 @@ def obtener_datos_campanas_mysql(grupos_filtro=None):
                     WHERE fecha BETWEEN %s AND %s AND alumno_id IN ({ph_ids})
                     GROUP BY alumno_id
                     """,
-                    (lunes_str, domingo_str, *ids)
+                    (lunes_str, domingo_str, *ids),
                 )
                 for al_id, r_s, f_s in cur.fetchall():
                     asistencias_semana[int(al_id)] = (int(r_s or 0), int(f_s or 0))
@@ -455,7 +450,7 @@ def obtener_datos_campanas_mysql(grupos_filtro=None):
 
 
 def crear_barra_campanas_semaforo(app, parent, grupos_filtro=None):
-    """Crea los 3 botones circulares con signo de campana (Verde, Amarillo y Rojo) con notificaciones."""
+    """Crea los 3 botones con signo de campana (Verde, Amarillo y Rojo) con notificaciones."""
     conteos, listas, lunes_str, domingo_str = obtener_datos_campanas_mysql(grupos_filtro=grupos_filtro)
 
     config_botones = [
@@ -464,15 +459,15 @@ def crear_barra_campanas_semaforo(app, parent, grupos_filtro=None):
             "#22C55E",
             "#15803D",
             "Campana Verde · 1 falta en la semana",
-            "Alumnos que solo tienen una falta en la semana",
+            "Alumnos con 1 falta en la semana",
             app.GREEN_SOFT,
         ),
         (
             "amarillo",
             "#EAB308",
             "#A16207",
-            "Campana Amarilla · >2 retardos o 2 faltas",
-            "Alumnos con más de 2 retardos o 2 faltas en la semana",
+            "Campana Amarilla · 2 faltas o 2 retardos",
+            "Alumnos con 2 faltas o 2 retardos en la semana",
             app.YELLOW_SOFT,
         ),
         (
@@ -504,17 +499,17 @@ def crear_barra_campanas_semaforo(app, parent, grupos_filtro=None):
                 nombres_al = ", ".join(f"{x[1]} ({x[2]})" for x in lst[:5])
                 messagebox.showwarning(
                     "Notificación crítica · Campana Roja",
-                    f"Semana ({lun} al {dom}): {len(lst)} alumno(s) con más de 2 faltas o retardos:\n{nombres_al}"
+                    f"Semana ({lun} al {dom}): {len(lst)} alumno(s) con más de 2 faltas o retardos:\n{nombres_al}",
                 )
             elif c == "amarillo" and lst:
                 messagebox.showinfo(
                     "Notificación de prevención · Campana Amarilla",
-                    f"Semana ({lun} al {dom}): {len(lst)} alumno(s) con más de 2 retardos o 2 faltas."
+                    f"Semana ({lun} al {dom}): {len(lst)} alumno(s) con 2 faltas o 2 retardos.",
                 )
             elif c == "verde" and lst:
                 messagebox.showinfo(
                     "Notificación · Campana Verde",
-                    f"Semana ({lun} al {dom}): {len(lst)} alumno(s) con 1 falta."
+                    f"Semana ({lun} al {dom}): {len(lst)} alumno(s) con 1 falta.",
                 )
 
             win = tk.Toplevel(app.root)
@@ -539,7 +534,7 @@ def crear_barra_campanas_semaforo(app, parent, grupos_filtro=None):
                 font=("Segoe UI", 9, "bold"),
                 padx=10,
                 pady=6,
-                anchor="w"
+                anchor="w",
             ).pack(fill="x", pady=(0, 8))
 
             frame_t = tk.Frame(body, bg=app.WHITE, highlightbackground=app.BORDER, highlightthickness=1)
@@ -552,7 +547,11 @@ def crear_barra_campanas_semaforo(app, parent, grupos_filtro=None):
             tv.pack(side="left", fill="both", expand=True)
             for col in cols:
                 tv.heading(col, text=col)
-                tv.column(col, width=180 if col in ("Alumno", "Criterio") else 80, anchor="w" if col in ("Alumno", "Criterio") else "center")
+                tv.column(
+                    col,
+                    width=180 if col in ("Alumno", "Criterio") else 80,
+                    anchor="w" if col in ("Alumno", "Criterio") else "center",
+                )
             for fila in lst:
                 tv.insert("", "end", values=fila)
 
@@ -587,7 +586,7 @@ def cargar_preferencia_usuario_mysql(usuario):
             cur = db.cursor(dictionary=True)
             cur.execute(
                 "SELECT colores FROM preferencias_usuario WHERE usuario=%s",
-                (usuario.strip(),)
+                (usuario.strip(),),
             )
             fila = cur.fetchone()
             if fila and fila.get("colores"):
@@ -619,11 +618,14 @@ def guardar_preferencia_usuario_mysql(usuario, colores_dict):
     try:
         with conectar_mysql(incluir_bd=True) as db:
             cur = db.cursor()
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO preferencias_usuario (usuario, colores)
                 VALUES (%s, %s)
                 ON DUPLICATE KEY UPDATE colores=VALUES(colores)
-            """, (usuario.strip(), json.dumps(colores_dict)))
+                """,
+                (usuario.strip(), json.dumps(colores_dict)),
+            )
             db.commit()
             return True
     except MySQLError as e:
@@ -646,15 +648,21 @@ def construir_bloque_personalizacion_colores(app, parent, usuario_clave, al_guar
     muestras = {}
 
     tk.Label(
-        parent, text=f"Tema personalizado para: {usuario_clave}",
-        bg=app.WHITE, fg=app.PURPLE, font=("Segoe UI", 10, "bold")
+        parent,
+        text=f"Tema personalizado para: {usuario_clave}",
+        bg=app.WHITE,
+        fg=app.PURPLE,
+        font=("Segoe UI", 10, "bold"),
     ).pack(anchor="w", pady=(0, 8))
 
     fila_preset = tk.Frame(parent, bg=app.WHITE)
     fila_preset.pack(fill="x", pady=(0, 10))
     tk.Label(
-        fila_preset, text="Tema prediseñado:", bg=app.WHITE, fg=app.TEXT_MAIN,
-        font=("Segoe UI", 9, "bold")
+        fila_preset,
+        text="Tema prediseñado:",
+        bg=app.WHITE,
+        fg=app.TEXT_MAIN,
+        font=("Segoe UI", 9, "bold"),
     ).pack(side="left", padx=(0, 8))
 
     combo_tema = ttk.Combobox(
@@ -664,17 +672,29 @@ def construir_bloque_personalizacion_colores(app, parent, usuario_clave, al_guar
     combo_tema.pack(side="left", padx=(0, 8))
 
     vista_previa = tk.Frame(
-        parent, bg=valores["WHITE"], padx=14, pady=12,
-        highlightthickness=1, highlightbackground=app.BORDER
+        parent,
+        bg=valores["WHITE"],
+        padx=14,
+        pady=12,
+        highlightthickness=1,
+        highlightbackground=app.BORDER,
     )
     lbl_vp_titulo = tk.Label(
-        vista_previa, text="Vista previa del tema",
-        bg=valores["WHITE"], fg=valores["TEXT_MAIN"], font=("Segoe UI", 10, "bold")
+        vista_previa,
+        text="Vista previa del tema",
+        bg=valores["WHITE"],
+        fg=valores["TEXT_MAIN"],
+        font=("Segoe UI", 10, "bold"),
     )
     lbl_vp_titulo.pack(anchor="w")
     lbl_vp_btn = tk.Label(
-        vista_previa, text="Botón y acento de ejemplo",
-        bg=valores["PURPLE"], fg="#FFFFFF", padx=12, pady=6, font=("Segoe UI", 8, "bold")
+        vista_previa,
+        text="Botón y acento de ejemplo",
+        bg=valores["PURPLE"],
+        fg="#FFFFFF",
+        padx=12,
+        pady=6,
+        font=("Segoe UI", 8, "bold"),
     )
     lbl_vp_btn.pack(anchor="w", pady=(6, 0))
 
@@ -701,13 +721,24 @@ def construir_bloque_personalizacion_colores(app, parent, usuario_clave, al_guar
         fila = tk.Frame(parent, bg=app.WHITE)
         fila.pack(fill="x", pady=3)
         tk.Label(
-            fila, text=etiqueta, bg=app.WHITE, fg=app.TEXT_MAIN,
-            font=("Segoe UI", 9), width=24, anchor="w"
+            fila,
+            text=etiqueta,
+            bg=app.WHITE,
+            fg=app.TEXT_MAIN,
+            font=("Segoe UI", 9),
+            width=24,
+            anchor="w",
         ).pack(side="left")
 
         muestra = tk.Label(
-            fila, text=valores[clave], bg=valores[clave],
-            fg=app.TEXT_SOFT, width=12, relief="solid", bd=1, font=("Segoe UI", 8, "bold")
+            fila,
+            text=valores[clave],
+            bg=valores[clave],
+            fg=app.TEXT_SOFT,
+            width=12,
+            relief="solid",
+            bd=1,
+            font=("Segoe UI", 8, "bold"),
         )
         muestra.pack(side="right", padx=(8, 0))
         muestras[clave] = muestra
@@ -756,7 +787,9 @@ def parsear_filas_masivas(texto_csv, encabezados_esperados):
     primera_lower = [c.lower() for c in filas[0]]
     esperados_lower = [e.lower() for e in encabezados_esperados]
     if primera_lower == esperados_lower or (
-        len(primera_lower) >= 2 and primera_lower[0] == esperados_lower[0] and primera_lower[1] == esperados_lower[1]
+        len(primera_lower) >= 2
+        and primera_lower[0] == esperados_lower[0]
+        and primera_lower[1] == esperados_lower[1]
     ):
         filas = filas[1:]
     return filas
@@ -790,15 +823,32 @@ def abrir_modal_carga_masiva(parent_app, titulo, descripcion, columnas_csv, ejem
     cuerpo = tk.Frame(win, bg=bg, padx=18, pady=14)
     cuerpo.pack(fill="both", expand=True)
 
-    tk.Label(cuerpo, text=f"Columnas esperadas: {', '.join(columnas_csv)}",
-             bg=bg, fg=fg_main, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 6))
+    tk.Label(
+        cuerpo,
+        text=f"Columnas esperadas: {', '.join(columnas_csv)}",
+        bg=bg,
+        fg=fg_main,
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 6))
 
     barra_arch = tk.Frame(cuerpo, bg=bg)
     barra_arch.pack(fill="x", pady=(0, 8))
 
-    txt = tk.Text(cuerpo, height=11, font=("Consolas", 9), bg=white, fg=fg_main,
-                  insertbackground=fg_main, relief="flat", highlightthickness=1,
-                  highlightbackground=border, highlightcolor=parent_app.PURPLE, bd=0, padx=8, pady=8)
+    txt = tk.Text(
+        cuerpo,
+        height=11,
+        font=("Consolas", 9),
+        bg=white,
+        fg=fg_main,
+        insertbackground=fg_main,
+        relief="flat",
+        highlightthickness=1,
+        highlightbackground=border,
+        highlightcolor=parent_app.PURPLE,
+        bd=0,
+        padx=8,
+        pady=8,
+    )
     txt.pack(fill="both", expand=True)
 
     texto_ejemplo = "\n".join([",".join(columnas_csv)] + [",".join(f) for f in ejemplo_filas])
@@ -808,7 +858,7 @@ def abrir_modal_carga_masiva(parent_app, titulo, descripcion, columnas_csv, ejem
         ruta = filedialog.askopenfilename(
             parent=win,
             title="Seleccionar archivo CSV",
-            filetypes=[("Archivos CSV", "*.csv"), ("Archivos de texto", "*.txt"), ("Todos los archivos", "*.*")]
+            filetypes=[("Archivos CSV", "*.csv"), ("Archivos de texto", "*.txt"), ("Todos los archivos", "*.*")],
         )
         if not ruta:
             return
@@ -825,7 +875,7 @@ def abrir_modal_carga_masiva(parent_app, titulo, descripcion, columnas_csv, ejem
             title="Guardar plantilla CSV",
             defaultextension=".csv",
             initialfile="plantilla_carga_masiva.csv",
-            filetypes=[("Archivos CSV", "*.csv")]
+            filetypes=[("Archivos CSV", "*.csv")],
         )
         if not ruta:
             return
@@ -928,37 +978,73 @@ class PanelDireccion:
         header_bg = self.DARK if self.modo_oscuro else "#F8FAFC"
         header_fg = self.TEAL if self.modo_oscuro else "#334155"
 
-        s.configure("Treeview", background=bg_tabla, foreground=fg_tabla,
-                    fieldbackground=bg_tabla, rowheight=34, borderwidth=0, font=("Segoe UI", 9))
-        s.configure("Treeview.Heading", background=header_bg, foreground=header_fg,
-                    font=("Segoe UI", 9, "bold"), padding=(8, 8), relief="flat")
-        s.map("Treeview", background=[("selected", self.PURPLE)],
-              foreground=[("selected", "#FFFFFF")])
+        s.configure(
+            "Treeview",
+            background=bg_tabla,
+            foreground=fg_tabla,
+            fieldbackground=bg_tabla,
+            rowheight=34,
+            borderwidth=0,
+            font=("Segoe UI", 9),
+        )
+        s.configure(
+            "Treeview.Heading",
+            background=header_bg,
+            foreground=header_fg,
+            font=("Segoe UI", 9, "bold"),
+            padding=(8, 8),
+            relief="flat",
+        )
+        s.map("Treeview", background=[("selected", self.PURPLE)], foreground=[("selected", "#FFFFFF")])
 
-        s.configure("TCombobox", padding=6, font=("Segoe UI", 9),
-                    fieldbackground=bg_tabla, background=header_bg,
-                    foreground=fg_tabla, arrowcolor=fg_tabla)
-        s.map("TCombobox",
-              fieldbackground=[("readonly", bg_tabla)],
-              foreground=[("readonly", fg_tabla)],
-              selectbackground=[("readonly", self.PURPLE)],
-              selectforeground=[("readonly", "#FFFFFF")])
+        s.configure(
+            "TCombobox",
+            padding=6,
+            font=("Segoe UI", 9),
+            fieldbackground=bg_tabla,
+            background=header_bg,
+            foreground=fg_tabla,
+            arrowcolor=fg_tabla,
+        )
+        s.map(
+            "TCombobox",
+            fieldbackground=[("readonly", bg_tabla)],
+            foreground=[("readonly", fg_tabla)],
+            selectbackground=[("readonly", self.PURPLE)],
+            selectforeground=[("readonly", "#FFFFFF")],
+        )
         self.root.option_add("*TCombobox*Listbox.background", bg_tabla)
         self.root.option_add("*TCombobox*Listbox.foreground", fg_tabla)
         self.root.option_add("*TCombobox*Listbox.selectBackground", self.PURPLE)
         self.root.option_add("*TCombobox*Listbox.selectForeground", "#FFFFFF")
 
         s.configure("TNotebook", background=self.BG, borderwidth=0, tabmargins=[0, 4, 0, 0])
-        s.configure("TNotebook.Tab", background=self.WHITE, foreground=self.TEXT_MAIN,
-                    font=("Segoe UI", 9, "bold"), padding=(14, 7), borderwidth=1)
-        s.map("TNotebook.Tab",
-              background=[("selected", self.PURPLE), ("active", self.LAVENDER)],
-              foreground=[("selected", "#FFFFFF"), ("active", self.TEXT_MAIN)])
+        s.configure(
+            "TNotebook.Tab",
+            background=self.WHITE,
+            foreground=self.TEXT_MAIN,
+            font=("Segoe UI", 9, "bold"),
+            padding=(14, 7),
+            borderwidth=1,
+        )
+        s.map(
+            "TNotebook.Tab",
+            background=[("selected", self.PURPLE), ("active", self.LAVENDER)],
+            foreground=[("selected", "#FFFFFF"), ("active", self.TEXT_MAIN)],
+        )
 
-        s.configure("Vertical.TScrollbar", background=self.DARK if self.modo_oscuro else self.BORDER,
-                    troughcolor=self.BG, borderwidth=0)
-        s.configure("Horizontal.TScrollbar", background=self.DARK if self.modo_oscuro else self.BORDER,
-                    troughcolor=self.BG, borderwidth=0)
+        s.configure(
+            "Vertical.TScrollbar",
+            background=self.DARK if self.modo_oscuro else self.BORDER,
+            troughcolor=self.BG,
+            borderwidth=0,
+        )
+        s.configure(
+            "Horizontal.TScrollbar",
+            background=self.DARK if self.modo_oscuro else self.BORDER,
+            troughcolor=self.BG,
+            borderwidth=0,
+        )
 
         self.root.option_add("*Entry.background", bg_tabla)
         self.root.option_add("*Entry.foreground", fg_tabla)
@@ -969,13 +1055,23 @@ class PanelDireccion:
     def boton(self, parent, texto, comando, color=None, fg=None, compacto=True):
         col = color if color else self.PURPLE
         texto_col = fg if fg else "#FFFFFF"
-        b = tk.Button(parent, text=texto, command=comando, bg=col, fg=texto_col,
-                      activebackground=self.DARK, activeforeground="#FFFFFF",
-                      font=("Segoe UI", 8 if compacto else 9, "bold"),
-                      bd=0, padx=11, pady=6 if compacto else 8,
-                      cursor="hand2", wraplength=220, relief="flat",
-                      highlightthickness=0)
-        return b
+        return tk.Button(
+            parent,
+            text=texto,
+            command=comando,
+            bg=col,
+            fg=texto_col,
+            activebackground=self.DARK,
+            activeforeground="#FFFFFF",
+            font=("Segoe UI", 8 if compacto else 9, "bold"),
+            bd=0,
+            padx=11,
+            pady=6 if compacto else 8,
+            cursor="hand2",
+            wraplength=220,
+            relief="flat",
+            highlightthickness=0,
+        )
 
     def formulario_modal(self, titulo, campos):
         ventana = tk.Toplevel(self.root)
@@ -984,13 +1080,19 @@ class PanelDireccion:
         ventana.transient(self.root)
         ventana.grab_set()
         ventana.resizable(True, False)
-        ventana.geometry("430x{}".format(min(580, 210 + len(campos) * 72)))
+        ventana.geometry(f"430x{min(580, 210 + len(campos) * 72)}")
 
         franja = tk.Frame(ventana, bg=self.NAVY, padx=18, pady=12)
         franja.pack(fill="x")
-        tk.Label(franja, text=titulo, bg=self.NAVY, fg=self.TEXT_NAV,
-                 font=("Segoe UI", 12, "bold"), wraplength=370,
-                 justify="left").pack(anchor="w")
+        tk.Label(
+            franja,
+            text=titulo,
+            bg=self.NAVY,
+            fg=self.TEXT_NAV,
+            font=("Segoe UI", 12, "bold"),
+            wraplength=370,
+            justify="left",
+        ).pack(anchor="w")
         tk.Frame(ventana, bg=self.PURPLE, height=2).pack(fill="x")
 
         cuerpo = tk.Frame(ventana, bg=self.BG, padx=18, pady=14)
@@ -999,24 +1101,36 @@ class PanelDireccion:
         for indice, campo in enumerate(campos):
             etiqueta, valor, opciones = campo
             fg_label = self.TEXT_MAIN
-            tk.Label(cuerpo, text=etiqueta, bg=self.BG, fg=fg_label,
-                     font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(6 if indice else 0, 3))
+            tk.Label(
+                cuerpo,
+                text=etiqueta,
+                bg=self.BG,
+                fg=fg_label,
+                font=("Segoe UI", 9, "bold"),
+            ).pack(anchor="w", pady=(6 if indice else 0, 3))
             if opciones:
                 control = ttk.Combobox(cuerpo, values=opciones, state="readonly", font=("Segoe UI", 9))
                 if valor is not None:
                     control.set(str(valor))
             else:
-                control = tk.Entry(cuerpo, font=("Segoe UI", 10), bg=self.WHITE,
-                                   fg=fg_label, insertbackground=fg_label,
-                                   relief="flat", highlightthickness=1,
-                                   highlightbackground=self.BORDER, highlightcolor=self.PURPLE, bd=0)
+                control = tk.Entry(
+                    cuerpo,
+                    font=("Segoe UI", 10),
+                    bg=self.WHITE,
+                    fg=fg_label,
+                    insertbackground=fg_label,
+                    relief="flat",
+                    highlightthickness=1,
+                    highlightbackground=self.BORDER,
+                    highlightcolor=self.PURPLE,
+                    bd=0,
+                )
                 if valor is not None:
                     control.insert(0, str(valor))
             control.pack(fill="x", ipady=6, pady=(0, 4))
             controles[etiqueta] = control
 
-        pie = tk.Frame(ventana, bg=self.WHITE, padx=18, pady=11,
-                       highlightbackground=self.BORDER, highlightthickness=1)
+        pie = tk.Frame(ventana, bg=self.WHITE, padx=18, pady=11, highlightbackground=self.BORDER, highlightthickness=1)
         pie.pack(fill="x", side="bottom")
         resultado = {"valores": None}
 
@@ -1068,34 +1182,54 @@ class PanelDireccion:
         outer = tk.Frame(self.root, bg=self.BG)
         outer.pack(fill="both", expand=True)
 
-        caja = tk.Frame(outer, bg=self.WHITE, padx=34, pady=30,
-                        highlightbackground=self.BORDER, highlightthickness=1)
-        caja.place(relx=.5, rely=.5, anchor="center", width=410)
+        caja = tk.Frame(
+            outer,
+            bg=self.WHITE,
+            padx=34,
+            pady=30,
+            highlightbackground=self.BORDER,
+            highlightthickness=1,
+        )
+        caja.place(relx=0.5, rely=0.5, anchor="center", width=410)
 
         tk.Frame(caja, bg=self.PURPLE, height=4).pack(fill="x", pady=(0, 18))
 
         fg_caja = self.TEXT_MAIN
-        tk.Label(caja, text="PRIMARIA NEZAHUALCÓYOTL", bg=self.WHITE, fg=self.PURPLE,
-                 font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        tk.Label(caja, text="Iniciar sesión", bg=self.WHITE, fg=fg_caja,
-                 font=("Segoe UI", 18, "bold")).pack(anchor="w", pady=(2, 2))
-        tk.Label(caja, text="Control escolar, asistencia y seguimiento",
-                 bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 14))
+        tk.Label(caja, text="PRIMARIA NEZAHUALCÓYOTL", bg=self.WHITE, fg=self.PURPLE, font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        tk.Label(caja, text="Iniciar sesión", bg=self.WHITE, fg=fg_caja, font=("Segoe UI", 18, "bold")).pack(anchor="w", pady=(2, 2))
+        tk.Label(caja, text="Control escolar, asistencia y seguimiento", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 14))
 
         btn_tema_txt = "Modo Oscuro" if not self.modo_oscuro else "Modo Claro"
         self.boton(caja, btn_tema_txt, self.cambiar_tema_login, self.BG, fg_caja, True).pack(anchor="e", pady=(0, 10))
 
-        tk.Label(caja, text="Usuario o docente", bg=self.WHITE, fg=fg_caja, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 3))
-        usuario = tk.Entry(caja, font=("Segoe UI", 10), bg=self.WHITE, fg=fg_caja,
-                           relief="flat", highlightthickness=1, highlightbackground=self.BORDER,
-                           highlightcolor=self.PURPLE, bd=0)
+        tk.Label(caja, text="Usuario (docente 1, docente 2... o director)", bg=self.WHITE, fg=fg_caja, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 3))
+        usuario = tk.Entry(
+            caja,
+            font=("Segoe UI", 10),
+            bg=self.WHITE,
+            fg=fg_caja,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=self.BORDER,
+            highlightcolor=self.PURPLE,
+            bd=0,
+        )
         usuario.pack(fill="x", ipady=7, pady=(0, 12))
-        usuario.insert(0, "Anabel")
+        usuario.insert(0, "docente 1")
 
         tk.Label(caja, text="Contraseña", bg=self.WHITE, fg=fg_caja, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 3))
-        clave = tk.Entry(caja, show="•", font=("Segoe UI", 10), bg=self.WHITE, fg=fg_caja,
-                         relief="flat", highlightthickness=1, highlightbackground=self.BORDER,
-                         highlightcolor=self.PURPLE, bd=0)
+        clave = tk.Entry(
+            caja,
+            show="•",
+            font=("Segoe UI", 10),
+            bg=self.WHITE,
+            fg=fg_caja,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=self.BORDER,
+            highlightcolor=self.PURPLE,
+            bd=0,
+        )
         clave.pack(fill="x", ipady=7, pady=(0, 16))
 
         def entrar(event=None):
@@ -1117,12 +1251,16 @@ class PanelDireccion:
                 pass
 
             if acceso_docente:
-                nombre_docente, grupo_asignado = acceso_docente
-                colores_doc = cargar_preferencia_usuario_mysql(nombre_docente)
+                nombre_docente, grupo_asignado, usuario_etiqueta = acceso_docente
+                colores_doc = cargar_preferencia_usuario_mysql(usuario_etiqueta) or cargar_preferencia_usuario_mysql(nombre_docente)
                 self.limpiar_raiz()
                 PanelDocente(
-                    self.root, nombre_docente, self.modo_oscuro,
-                    grupo_fijo=grupo_asignado, colores_personalizados=colores_doc
+                    self.root,
+                    nombre_docente,
+                    self.modo_oscuro,
+                    grupo_fijo=grupo_asignado,
+                    colores_personalizados=colores_doc,
+                    usuario_login=usuario_etiqueta,
                 )
             else:
                 messagebox.showerror("Acceso denegado", "Usuario o contraseña incorrectos.")
@@ -1166,23 +1304,18 @@ class PanelDireccion:
         self.menu.pack_propagate(False)
 
         if self.compacto:
-            tk.Label(self.menu, text="PN", bg=self.PURPLE, fg="#FFFFFF",
-                     font=("Segoe UI", 10, "bold"), pady=8).pack(fill="x", padx=8, pady=12)
+            tk.Label(self.menu, text="PN", bg=self.PURPLE, fg="#FFFFFF", font=("Segoe UI", 10, "bold"), pady=8).pack(fill="x", padx=8, pady=12)
         else:
             brand = tk.Frame(self.menu, bg=self.NAVY, padx=14, pady=16)
             brand.pack(fill="x")
-            tk.Label(brand, text="PRIMARIA", bg=self.NAVY, fg=self.TEAL,
-                     font=("Segoe UI", 8, "bold")).pack(anchor="w")
-            tk.Label(brand, text="Nezahualcóyotl", bg=self.NAVY, fg=self.TEXT_NAV,
-                     font=("Segoe UI", 13, "bold")).pack(anchor="w")
-            tk.Label(brand, text="Rol: Dirección Escolar", bg=self.NAVY, fg=self.MUTED,
-                     font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
+            tk.Label(brand, text="PRIMARIA", bg=self.NAVY, fg=self.TEAL, font=("Segoe UI", 8, "bold")).pack(anchor="w")
+            tk.Label(brand, text="Nezahualcóyotl", bg=self.NAVY, fg=self.TEXT_NAV, font=("Segoe UI", 13, "bold")).pack(anchor="w")
+            tk.Label(brand, text="Rol: Dirección Escolar", bg=self.NAVY, fg=self.MUTED, font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
 
         tk.Frame(self.menu, bg=self.DARK, height=1).pack(fill="x", padx=12, pady=(0, 8))
 
         if not self.compacto:
-            tk.Label(self.menu, text="SECCIONES", bg=self.NAVY, fg=self.MUTED,
-                     font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=14, pady=(2, 4))
+            tk.Label(self.menu, text="SECCIONES", bg=self.NAVY, fg=self.MUTED, font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=14, pady=(2, 4))
 
         nav = [
             ("⌂", "Inicio"),
@@ -1194,7 +1327,8 @@ class PanelDireccion:
             ("◇", "Cartas Compromiso"),
             ("⚑", "Módulo de Alertas"),
             ("▥", "Reportes Periódicos"),
-            ("⚙", "Configuración")]
+            ("⚙", "Configuración"),
+        ]
 
         for icon, label in nav:
             activa = self.pagina == label
@@ -1217,39 +1351,39 @@ class PanelDireccion:
                 pady=6,
                 anchor="w" if not self.compacto else "center",
                 cursor="hand2",
-                relief="flat"
+                relief="flat",
             ).pack(side="left", fill="both", expand=True)
 
         tk.Frame(self.menu, bg=self.NAVY).pack(fill="both", expand=True)
         tk.Frame(self.menu, bg=self.DARK, height=1).pack(fill="x", padx=10, pady=(0, 6))
-        self.boton(self.menu, "⇦" if self.compacto else "Cerrar sesión",
-                   self.cerrar_sesion, self.DARK, self.TEXT_NAV, True).pack(fill="x", padx=8, pady=(0, 10))
+        self.boton(
+            self.menu,
+            "⇦" if self.compacto else "Cerrar sesión",
+            self.cerrar_sesion,
+            self.DARK,
+            self.TEXT_NAV,
+            True,
+        ).pack(fill="x", padx=8, pady=(0, 10))
 
         right_col = tk.Frame(self.root, bg=self.BG)
         right_col.pack(side="left", fill="both", expand=True)
 
-        top = tk.Frame(right_col, bg=self.WHITE, padx=18, pady=10,
-                       highlightbackground=self.BORDER, highlightthickness=1)
+        top = tk.Frame(right_col, bg=self.WHITE, padx=18, pady=10, highlightbackground=self.BORDER, highlightthickness=1)
         top.pack(fill="x")
 
         btn_tema_txt = "Modo Oscuro" if not self.modo_oscuro else "Modo Claro"
         self.boton(top, btn_tema_txt, self.cambiar_tema, self.BG, self.TEXT_MAIN, True).pack(side="right", padx=(8, 0))
         crear_barra_campanas_semaforo(self, top, grupos_filtro=None).pack(side="right", padx=(0, 8))
-        tk.Label(top, text=date.today().strftime("%d/%m/%Y"),
-                 bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 9, "bold")).pack(side="right", padx=8)
+        tk.Label(top, text=date.today().strftime("%d/%m/%Y"), bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 9, "bold")).pack(side="right", padx=8)
 
-        self.lbl_top_seccion = tk.Label(top, text=pagina, bg=self.WHITE, fg=self.TEXT_MAIN,
-                                        font=("Segoe UI", 14, "bold"))
+        self.lbl_top_seccion = tk.Label(top, text=pagina, bg=self.WHITE, fg=self.TEXT_MAIN, font=("Segoe UI", 14, "bold"))
         self.lbl_top_seccion.pack(anchor="w")
-        self.lbl_top_sub = tk.Label(top, text="Resumen general de la actividad escolar",
-                                    bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 8))
+        self.lbl_top_sub = tk.Label(top, text="Resumen general de la actividad escolar", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 8))
         self.lbl_top_sub.pack(anchor="w")
 
-        quick_bar = tk.Frame(right_col, bg=self.WHITE, padx=18, pady=6,
-                             highlightbackground=self.BORDER, highlightthickness=1)
+        quick_bar = tk.Frame(right_col, bg=self.WHITE, padx=18, pady=6, highlightbackground=self.BORDER, highlightthickness=1)
         quick_bar.pack(fill="x")
-        tk.Label(quick_bar, text="Rápido:", bg=self.WHITE, fg=self.MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 8))
+        tk.Label(quick_bar, text="Rápido:", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 8))
         self._botones_rapidos = {}
         for q_txt, q_dest in [
             ("Inicio", "Inicio"),
@@ -1265,7 +1399,7 @@ class PanelDireccion:
                 lambda p=q_dest: self.mostrar(p),
                 self.PURPLE if es_act else self.BG,
                 "#FFFFFF" if es_act else self.TEXT_MAIN,
-                True
+                True,
             )
             btn_q.pack(side="left", padx=(0, 6))
             self._botones_rapidos[q_dest] = btn_q
@@ -1303,25 +1437,47 @@ class PanelDireccion:
         return outer
 
     def tarjeta(self, parent, nombre, valor, detalle, color, comando=None):
-        card = tk.Frame(parent, bg=self.WHITE,
-                        highlightbackground=self.BORDER, highlightthickness=1,
-                        cursor="hand2" if comando else "")
+        card = tk.Frame(
+            parent,
+            bg=self.WHITE,
+            highlightbackground=self.BORDER,
+            highlightthickness=1,
+            cursor="hand2" if comando else "",
+        )
         tk.Frame(card, bg=color, width=4).pack(side="left", fill="y")
-        body = tk.Frame(card, bg=self.WHITE, padx=12, pady=10,
-                        cursor="hand2" if comando else "")
+        body = tk.Frame(card, bg=self.WHITE, padx=12, pady=10, cursor="hand2" if comando else "")
         body.pack(side="left", fill="both", expand=True)
         fg_card = self.TEXT_MAIN
-        lbl_nom = tk.Label(body, text=nombre.upper(), bg=self.WHITE, fg=self.MUTED,
-                           font=("Segoe UI", 7, "bold"), wraplength=150, justify="left",
-                           cursor="hand2" if comando else "")
+        lbl_nom = tk.Label(
+            body,
+            text=nombre.upper(),
+            bg=self.WHITE,
+            fg=self.MUTED,
+            font=("Segoe UI", 7, "bold"),
+            wraplength=150,
+            justify="left",
+            cursor="hand2" if comando else "",
+        )
         lbl_nom.pack(anchor="w")
-        lbl_val = tk.Label(body, text=str(valor), bg=self.WHITE, fg=fg_card,
-                           font=("Segoe UI", 19, "bold"),
-                           cursor="hand2" if comando else "")
+        lbl_val = tk.Label(
+            body,
+            text=str(valor),
+            bg=self.WHITE,
+            fg=fg_card,
+            font=("Segoe UI", 19, "bold"),
+            cursor="hand2" if comando else "",
+        )
         lbl_val.pack(anchor="w", pady=(2, 2))
-        lbl_det = tk.Label(body, text=detalle, bg=self.WHITE, fg=self.MUTED,
-                           font=("Segoe UI", 8), wraplength=160, justify="left",
-                           cursor="hand2" if comando else "")
+        lbl_det = tk.Label(
+            body,
+            text=detalle,
+            bg=self.WHITE,
+            fg=self.MUTED,
+            font=("Segoe UI", 8),
+            wraplength=160,
+            justify="left",
+            cursor="hand2" if comando else "",
+        )
         lbl_det.pack(anchor="w")
 
         if comando:
@@ -1333,7 +1489,7 @@ class PanelDireccion:
         return card
 
     def abrir_vista_kpi(self, filtro_kpi):
-        """Muestra una pestaña/vista específica al hacer clic en un KPI sin añadirla a la barra lateral."""
+        """Muestra una vista específica al hacer clic en un KPI sin añadirla a la barra lateral."""
         if filtro_kpi == "Incidencias":
             self.mostrar("Conducta / Incidencias")
             return
@@ -1349,7 +1505,7 @@ class PanelDireccion:
 
         titulos_kpi = {
             "Alumnos": ("Detalle · Alumnos registrados", "Listado general de expedientes escolares"),
-            "Presentes": ("Detalle · Alumnos presentes / regulares", "Alumnos sin faltas ni retardos acumulados o presentes hoy"),
+            "Presentes": ("Detalle · Alumnos presentes / regulares", "Alumnos presentes hoy o sin faltas ni retardos acumulados"),
             "Retardos": ("Detalle · Alumnos con retardos", "Criterio institucional: 3 retardos = 1 falta"),
             "Faltas": ("Detalle · Alumnos con faltas", "Faltas registradas y equivalentes por retardos (3 ret. = 1 falta)"),
         }
@@ -1363,10 +1519,17 @@ class PanelDireccion:
         sec = self.seccion(self.contenido, tit)
         sec.pack(fill="both", expand=True, padx=18, pady=6)
 
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT alumno_id FROM asistencias WHERE fecha=%s AND estado='Presente'", (date.today().isoformat(),))
-            presentes_hoy = {r[0] for r in cur.fetchall()}
+        presentes_hoy = set()
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    "SELECT alumno_id FROM asistencias WHERE fecha=%s AND estado='Presente'",
+                    (date.today().isoformat(),),
+                )
+                presentes_hoy = {r[0] for r in cur.fetchall()}
+        except MySQLError:
+            pass
 
         alumnos = self.obtener_alumnos()
         filas = []
@@ -1399,7 +1562,7 @@ class PanelDireccion:
             ("ID", "Alumno", "Grupo", "Retardos", "Faltas Reg.", "Total Faltas", "Detalle"),
             filas,
             {"Alumno": 190, "Detalle": 160},
-            10
+            10,
         )
 
     def mostrar(self, pagina):
@@ -1418,7 +1581,8 @@ class PanelDireccion:
             "Cartas Compromiso": "Acuerdos y cartas compromiso con alumnos y tutores",
             "Módulo de Alertas": "Alertas de asistencia, faltas, retardos y justificantes",
             "Reportes Periódicos": "Consulta y exportación de información",
-            "Configuración": "Parámetros y estado del sistema"}
+            "Configuración": "Parámetros y estado del sistema",
+        }
         self.titulo(pagina, subtitulos.get(pagina, "Gestión escolar"))
         rutas = {
             "Inicio": self.pagina_inicio,
@@ -1430,43 +1594,78 @@ class PanelDireccion:
             "Cartas Compromiso": self.pagina_cartas_compromiso,
             "Módulo de Alertas": self.pagina_alertas,
             "Reportes Periódicos": self.pagina_reportes,
-            "Configuración": self.pagina_configuracion}
+            "Configuración": self.pagina_configuracion,
+        }
         rutas.get(pagina, self.pagina_inicio)()
 
     def obtener_metricas(self):
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT nombre, valor FROM metricas")
-            data = dict(cur.fetchall())
-            cur.execute("SELECT COUNT(*) FROM alumnos")
-            total = cur.fetchone()[0]
-            if total:
-                data["Alumnos"] = total
-            return data
+        data = {}
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("SELECT nombre, valor FROM metricas")
+                data = dict(cur.fetchall())
+
+                cur.execute("SELECT COUNT(*) FROM alumnos")
+                total_alumnos = int(cur.fetchone()[0] or 0)
+                if total_alumnos:
+                    data["Alumnos"] = total_alumnos
+
+                hoy_str = date.today().isoformat()
+                cur.execute(
+                    """
+                    SELECT
+                        SUM(CASE WHEN estado='Presente' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN estado='Retardo' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN estado='Falta' THEN 1 ELSE 0 END)
+                    FROM asistencias WHERE fecha=%s
+                    """,
+                    (hoy_str,),
+                )
+                row_hoy = cur.fetchone()
+                if row_hoy and any(v is not None for v in row_hoy):
+                    data["Presentes"] = int(row_hoy[0] or 0)
+                    data["Retardos"] = int(row_hoy[1] or 0)
+                    data["Faltas"] = int(row_hoy[2] or 0)
+        except MySQLError:
+            pass
+        return data
 
     def obtener_alumnos(self):
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT id, nombre, grupo, retardos, faltas FROM alumnos ORDER BY grupo, nombre")
-            return cur.fetchall()
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("SELECT id, nombre, grupo, retardos, faltas FROM alumnos ORDER BY grupo, nombre")
+                return cur.fetchall()
+        except MySQLError:
+            return []
 
     def obtener_grupos(self):
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT id, grupo, docente, alumnos FROM grupos ORDER BY grupo")
-            return cur.fetchall()
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("SELECT id, grupo, docente, alumnos FROM grupos ORDER BY id ASC")
+                return cur.fetchall()
+        except MySQLError:
+            return []
 
     def contar_justificantes(self):
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT COUNT(*) FROM justificantes WHERE estado='Pendiente'")
-            return cur.fetchone()[0]
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("SELECT COUNT(*) FROM justificantes WHERE estado='Pendiente'")
+                return cur.fetchone()[0]
+        except MySQLError:
+            return 0
 
     def contar_incidencias(self):
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT COUNT(*) FROM incidencias WHERE estado='Pendiente'")
-            return cur.fetchone()[0]
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("SELECT COUNT(*) FROM incidencias WHERE estado='Pendiente'")
+                return cur.fetchone()[0]
+        except MySQLError:
+            return 0
 
     def pagina_inicio(self):
         m = self.obtener_metricas()
@@ -1477,24 +1676,29 @@ class PanelDireccion:
         pendientes = self.contar_justificantes()
         incidencias = self.contar_incidencias()
 
-        banner = tk.Frame(self.contenido, bg=self.NAVY, padx=18, pady=12,
-                          highlightbackground=self.BORDER, highlightthickness=1)
+        banner = tk.Frame(self.contenido, bg=self.NAVY, padx=18, pady=12, highlightbackground=self.BORDER, highlightthickness=1)
         banner.pack(fill="x", padx=18, pady=(12, 8))
-        tk.Label(banner, text="CENTRO DE CONTROL ESCOLAR", bg=self.NAVY,
-                 fg=self.TEAL, font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        tk.Label(banner, text="Monitoreo en tiempo real de asistencia, avisos y disciplina.",
-                 bg=self.NAVY, fg=self.TEXT_NAV, font=("Segoe UI", 11, "bold"),
-                 wraplength=540, justify="left").pack(anchor="w", pady=(2, 0))
+        tk.Label(banner, text="CENTRO DE CONTROL ESCOLAR", bg=self.NAVY, fg=self.TEAL, font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        tk.Label(
+            banner,
+            text="Monitoreo en tiempo real de asistencia, avisos y disciplina.",
+            bg=self.NAVY,
+            fg=self.TEXT_NAV,
+            font=("Segoe UI", 11, "bold"),
+            wraplength=540,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 0))
 
         wrap = tk.Frame(self.contenido, bg=self.BG)
         wrap.pack(fill="x", padx=14)
         values = [
             ("Alumnos", total, "Expedientes registrados", self.PURPLE, lambda: self.abrir_vista_kpi("Alumnos")),
-            ("Presentes", presentes, f"{presentes / total * 100:.1f}% asistencia" if total else "Sin registros", self.GOLD, lambda: self.abrir_vista_kpi("Presentes")),
+            ("Presentes", presentes, f"{presentes / total * 100:.1f}% hoy" if total else "Sin registros", self.GOLD, lambda: self.abrir_vista_kpi("Presentes")),
             ("Retardos", retardos, "Registrados hoy", self.TEAL, lambda: self.abrir_vista_kpi("Retardos")),
             ("Faltas", faltas, "Registradas hoy", self.RED, lambda: self.abrir_vista_kpi("Faltas")),
             ("Incidencias", incidencias, "Casos pendientes", self.RED_DARK, lambda: self.abrir_vista_kpi("Incidencias")),
-            ("Justificantes", pendientes, "Por validar", self.PURPLE, lambda: self.abrir_vista_kpi("Justificantes"))]
+            ("Justificantes", pendientes, "Por validar", self.PURPLE, lambda: self.abrir_vista_kpi("Justificantes")),
+        ]
         for i, val in enumerate(values):
             card = self.tarjeta(wrap, *val)
             card.grid(row=i // 3, column=i % 3, sticky="nsew", padx=4, pady=4)
@@ -1518,7 +1722,8 @@ class PanelDireccion:
         for label, number, color in [
             ("Presentes", presentes, self.GOLD),
             ("Retardos", retardos, self.TEAL),
-            ("Faltas", faltas, self.RED)]:
+            ("Faltas", faltas, self.RED),
+        ]:
             line = tk.Frame(summary, bg=self.WHITE)
             line.pack(fill="x", pady=3)
             tk.Label(line, text=label, bg=self.WHITE, fg=fg_lbl, font=("Segoe UI", 8, "bold"), width=10, anchor="w").pack(side="left")
@@ -1532,11 +1737,12 @@ class PanelDireccion:
         sec_quick = self.seccion(left, "Accesos rápidos")
         sec_quick.pack(fill="x")
         quick = sec_quick.body
-        for label, dest in [("Enviar comunicado", "Comunicados Oficiales"),
-                            ("Bitácora directiva", "Bitácora Directiva"),
-                            ("Generar reporte", "Reportes Periódicos")]:
-            self.boton(quick, label, lambda p=dest: self.mostrar(p),
-                       self.LAVENDER, self.TEXT_SOFT, True).pack(fill="x", pady=2)
+        for label, dest in [
+            ("Enviar comunicado", "Comunicados Oficiales"),
+            ("Bitácora directiva", "Bitácora Directiva"),
+            ("Generar reporte", "Reportes Periódicos"),
+        ]:
+            self.boton(quick, label, lambda p=dest: self.mostrar(p), self.LAVENDER, self.TEXT_SOFT, True).pack(fill="x", pady=2)
 
         sec_alt = self.seccion(right, "Atención directiva")
         sec_alt.pack(fill="both", expand=True, pady=(0, 8))
@@ -1544,9 +1750,17 @@ class PanelDireccion:
 
         sec_rule = self.seccion(right, "Criterio institucional")
         sec_rule.pack(fill="x")
-        tk.Label(sec_rule.body, text="3 retardos equivalen a 1 falta adicional automática.",
-                 bg=self.GREEN_SOFT, fg=self.TEXT_SOFT, font=("Segoe UI", 8, "bold"),
-                 wraplength=260, justify="left", padx=10, pady=8).pack(fill="x")
+        tk.Label(
+            sec_rule.body,
+            text="3 retardos equivalen a 1 falta adicional automática.",
+            bg=self.GREEN_SOFT,
+            fg=self.TEXT_SOFT,
+            font=("Segoe UI", 8, "bold"),
+            wraplength=260,
+            justify="left",
+            padx=10,
+            pady=8,
+        ).pack(fill="x")
 
     def crear_tabla(self, parent, columnas, filas, anchos=None, height=7):
         frame = tk.Frame(parent, bg=self.WHITE, highlightbackground=self.BORDER, highlightthickness=1)
@@ -1561,7 +1775,13 @@ class PanelDireccion:
         for col in columnas:
             tabla.heading(col, text=col)
             ancho = (anchos or {}).get(col, 100)
-            tabla.column(col, width=ancho, minwidth=40, anchor="w" if col in ("Alumno", "Docente", "Motivo", "Descripción", "Nota", "Título", "Mensaje", "Entrada", "Asunto") else "center", stretch=True)
+            tabla.column(
+                col,
+                width=ancho,
+                minwidth=40,
+                anchor="w" if col in ("Alumno", "Docente", "Motivo", "Descripción", "Nota", "Título", "Mensaje", "Entrada", "Asunto") else "center",
+                stretch=True,
+            )
         for fila in filas:
             tabla.insert("", "end", values=fila)
         return tabla
@@ -1575,26 +1795,35 @@ class PanelDireccion:
         actions.pack(fill="x", pady=(0, 10))
         self.boton(actions, "＋ Agregar grupo", self.agregar_grupo, self.GOLD, "#FFFFFF").pack(side="left", padx=(0, 6))
         self.boton(actions, "Editar grupo", self.editar_grupo, self.DARK, self.TEXT_NAV).pack(side="left", padx=(0, 6))
+        self.boton(actions, "Eliminar grupo", self.eliminar_grupo, self.RED, "#FFFFFF").pack(side="left", padx=(0, 6))
         self.boton(actions, "⬆ Carga masiva grupos", self.carga_masiva_grupos, self.PURPLE, "#FFFFFF").pack(side="left", padx=(0, 6))
         self.boton(actions, "⬆ Carga masiva alumnos", self.carga_masiva_alumnos, self.TEAL, "#FFFFFF").pack(side="left", padx=(0, 6))
         self.boton(actions, "Actualizar", lambda: self.mostrar("Grupos y Docentes"), self.BG, self.TEXT_MAIN).pack(side="right")
 
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("""
-                SELECT g.grupo, g.docente, g.alumnos,
-                       COALESCE(SUM(a.retardos), 0),
-                       COALESCE(SUM(a.faltas), 0),
-                       COALESCE(SUM(CASE WHEN a.faltas >= %s THEN 1 ELSE 0 END), 0)
-                FROM grupos g
-                LEFT JOIN alumnos a ON a.grupo = g.grupo
-                GROUP BY g.id, g.grupo, g.docente, g.alumnos
-                ORDER BY g.grupo, 6 DESC, 5 DESC
-            """, (UMBRAL_FALTAS,))
-            filas = cur.fetchall()
+        filas = []
+        todos_alumnos = []
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    """
+                    SELECT g.grupo, g.docente, g.alumnos,
+                           COALESCE(SUM(a.retardos), 0),
+                           COALESCE(SUM(a.faltas), 0),
+                           COALESCE(SUM(CASE WHEN a.faltas >= %s THEN 1 ELSE 0 END), 0)
+                    FROM grupos g
+                    LEFT JOIN alumnos a ON a.grupo = g.grupo
+                    GROUP BY g.id, g.grupo, g.docente, g.alumnos
+                    ORDER BY g.id ASC
+                    """,
+                    (UMBRAL_FALTAS,),
+                )
+                filas = cur.fetchall()
 
-            cur.execute("SELECT id, nombre, grupo, retardos, faltas FROM alumnos ORDER BY grupo, nombre")
-            todos_alumnos = cur.fetchall()
+                cur.execute("SELECT id, nombre, grupo, retardos, faltas FROM alumnos ORDER BY grupo, nombre")
+                todos_alumnos = cur.fetchall()
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
 
         notebook = ttk.Notebook(box)
         notebook.pack(fill="both", expand=True, pady=(4, 0))
@@ -1609,40 +1838,45 @@ class PanelDireccion:
                 text="No hay grupos registrados. Usa 'Agregar grupo' o 'Carga masiva grupos' para crear una pestaña.",
                 bg=self.WHITE,
                 fg=self.MUTED,
-                font=("Segoe UI", 9)
+                font=("Segoe UI", 9),
             ).pack(anchor="w")
             return
 
-        for grupo_nombre, docente, alumnos_meta, retardos_g, faltas_g, alertas_g in filas:
+        for idx_doc, (grupo_nombre, docente, alumnos_meta, retardos_g, faltas_g, alertas_g) in enumerate(filas, start=1):
             pestana_grupo = tk.Frame(notebook, bg=self.BG, padx=12, pady=12)
-            notebook.add(pestana_grupo, text=grupo_nombre)
-            self._datos_grupos_pestanas[grupo_nombre] = (grupo_nombre, docente)
+            notebook.add(pestana_grupo, text=f"{grupo_nombre} (docente {idx_doc})")
+            self._datos_grupos_pestanas[f"{grupo_nombre} (docente {idx_doc})"] = (grupo_nombre, docente)
 
             alumnos_del_grupo = [a for a in todos_alumnos if a[2] == grupo_nombre]
-            total_al = len(alumnos_del_grupo) if alumnos_del_grupo else alumnos_meta
+            total_al = len(alumnos_del_grupo)
 
             stats_row = tk.Frame(pestana_grupo, bg=self.BG)
             stats_row.pack(fill="x", pady=(0, 10))
 
             resumen_items = [
-                ("DOCENTE TITULAR", docente, self.PURPLE),
+                (f"DOCENTE {idx_doc} (CLAVE: 1234)", docente, self.PURPLE),
                 ("ALUMNOS", str(total_al), self.TEAL),
                 ("RETARDOS", str(retardos_g), self.GOLD),
                 ("FALTAS", str(faltas_g), self.RED),
                 ("ALERTAS", str(alertas_g), self.RED_DARK),
             ]
             for idx, (etq, val, col) in enumerate(resumen_items):
-                c = tk.Frame(stats_row, bg=self.WHITE,
-                             highlightbackground=self.BORDER, highlightthickness=1)
+                c = tk.Frame(stats_row, bg=self.WHITE, highlightbackground=self.BORDER, highlightthickness=1)
                 c.grid(row=0, column=idx, sticky="nsew", padx=(0 if idx == 0 else 4, 0))
                 stats_row.grid_columnconfigure(idx, weight=1)
                 tk.Frame(c, bg=col, width=3).pack(side="left", fill="y")
                 c_body = tk.Frame(c, bg=self.WHITE, padx=10, pady=7)
                 c_body.pack(side="left", fill="both", expand=True)
                 tk.Label(c_body, text=etq, bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 7, "bold")).pack(anchor="w")
-                tk.Label(c_body, text=val, bg=self.WHITE, fg=self.TEXT_MAIN,
-                         font=("Segoe UI", 10 if idx == 0 else 13, "bold"),
-                         wraplength=150, justify="left").pack(anchor="w")
+                tk.Label(
+                    c_body,
+                    text=val,
+                    bg=self.WHITE,
+                    fg=self.TEXT_MAIN,
+                    font=("Segoe UI", 10 if idx == 0 else 13, "bold"),
+                    wraplength=150,
+                    justify="left",
+                ).pack(anchor="w")
 
             filas_alumnos = []
             for ident, nombre, gpo, ret, fal in alumnos_del_grupo:
@@ -1654,7 +1888,7 @@ class PanelDireccion:
                 ("ID", "Alumno", "Grupo", "Retardos", "Faltas", "Estado"),
                 filas_alumnos,
                 {"Alumno": 200, "Estado": 100},
-                6
+                6,
             )
             fg_tag = self.TEXT_SOFT
             tabla_al.tag_configure("retardo", background=self.YELLOW_SOFT, foreground=fg_tag)
@@ -1673,15 +1907,89 @@ class PanelDireccion:
                 "Registrar seguimiento",
                 lambda t=tabla_al: self._seguimiento_desde_pestana(t),
                 self.GOLD,
-                "#FFFFFF"
+                "#FFFFFF",
+            ).pack(side="left", padx=(0, 6))
+            self.boton(
+                bar_al,
+                "Editar alumno",
+                lambda t=tabla_al: self._editar_alumno_desde_tabla(t),
+                self.DARK,
+                self.TEXT_NAV,
+            ).pack(side="left", padx=(0, 6))
+            self.boton(
+                bar_al,
+                "Eliminar alumno",
+                lambda t=tabla_al: self._eliminar_alumno_desde_tabla(t),
+                self.RED,
+                "#FFFFFF",
             ).pack(side="left", padx=(0, 6))
             self.boton(
                 bar_al,
                 f"⬆ Cargar alumnos en {grupo_nombre}",
                 lambda g=grupo_nombre: self.carga_masiva_alumnos(grupo_predefinido=g),
                 self.TEAL,
-                "#FFFFFF"
+                "#FFFFFF",
             ).pack(side="left")
+
+    def _editar_alumno_desde_tabla(self, tabla):
+        if not tabla or not tabla.selection():
+            messagebox.showwarning("Selecciona", "Selecciona un alumno de la tabla.")
+            return
+        vals = tabla.item(tabla.selection()[0], "values")
+        alumno_id = int(vals[0])
+        grupos_disp = [g[1] for g in self.obtener_grupos()] or [vals[2]]
+        datos = self.formulario_modal(
+            "Editar alumno",
+            [
+                ("Nombre completo", vals[1], None),
+                ("Grupo", vals[2], grupos_disp),
+                ("Retardos", vals[3], None),
+                ("Faltas", vals[4], None),
+            ],
+        )
+        if not datos:
+            return
+        try:
+            ret_val = int(datos["Retardos"])
+            fal_val = int(datos["Faltas"])
+            if ret_val < 0 or fal_val < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Valor inválido", "Retardos y faltas deben ser números enteros no negativos.")
+            return
+
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    "UPDATE alumnos SET nombre=%s, grupo=%s, retardos=%s, faltas=%s WHERE id=%s",
+                    (datos["Nombre completo"], datos["Grupo"], ret_val, fal_val, alumno_id),
+                )
+                sincronizar_conteo_grupos(cur)
+                db.commit()
+            self.mostrar("Grupos y Docentes")
+        except IntegrityError:
+            messagebox.showwarning("Duplicado", "Ya existe un alumno con ese nombre en ese grupo.")
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
+
+    def _eliminar_alumno_desde_tabla(self, tabla):
+        if not tabla or not tabla.selection():
+            messagebox.showwarning("Selecciona", "Selecciona un alumno de la tabla.")
+            return
+        vals = tabla.item(tabla.selection()[0], "values")
+        alumno_id, nombre_al = int(vals[0]), vals[1]
+        if not messagebox.askyesno("Eliminar alumno", f"¿Deseas eliminar a '{nombre_al}' y su historial de asistencia?"):
+            return
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("DELETE FROM alumnos WHERE id=%s", (alumno_id,))
+                sincronizar_conteo_grupos(cur)
+                db.commit()
+            self.mostrar("Grupos y Docentes")
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
 
     def _seguimiento_desde_pestana(self, tabla):
         if not tabla or not tabla.selection():
@@ -1711,13 +2019,18 @@ class PanelDireccion:
                             continue
                         cur.execute("SELECT id FROM grupos WHERE grupo=%s", (grupo,))
                         if cur.fetchone():
-                            cur.execute("UPDATE grupos SET docente=%s, alumnos=%s WHERE grupo=%s",
-                                        (docente, alumnos_cant, grupo))
+                            cur.execute(
+                                "UPDATE grupos SET docente=%s, alumnos=%s WHERE grupo=%s",
+                                (docente, alumnos_cant, grupo),
+                            )
                             actualizados += 1
                         else:
-                            cur.execute("INSERT INTO grupos (grupo, docente, alumnos) VALUES (%s, %s, %s)",
-                                        (grupo, docente, alumnos_cant))
+                            cur.execute(
+                                "INSERT INTO grupos (grupo, docente, alumnos) VALUES (%s, %s, %s)",
+                                (grupo, docente, alumnos_cant),
+                            )
                             insertados += 1
+                    sincronizar_conteo_grupos(cur)
                     db.commit()
             except MySQLError as e:
                 messagebox.showerror("Error MySQL", str(e), parent=self.root)
@@ -1735,7 +2048,7 @@ class PanelDireccion:
             "Importa varios grupos a la vez desde CSV o pegando filas.",
             ["grupo", "docente", "alumnos"],
             [["5° B", "Elena Soto Vargas", "29"], ["6° A", "Carlos Méndez Ortiz", "30"]],
-            procesar
+            procesar,
         )
 
     def carga_masiva_alumnos(self, grupo_predefinido=None):
@@ -1767,16 +2080,19 @@ class PanelDireccion:
                         except ValueError:
                             errores.append(f"Fila {idx}: retardos o faltas deben ser números enteros.")
                             continue
-                        cur.execute("INSERT IGNORE INTO grupos (grupo, docente, alumnos) VALUES (%s, %s, 0)",
-                                    (grupo, "Por asignar"))
+                        cur.execute(
+                            "INSERT IGNORE INTO grupos (grupo, docente, alumnos) VALUES (%s, %s, 0)",
+                            (grupo, "Por asignar"),
+                        )
                         cur.execute(
                             "INSERT IGNORE INTO alumnos (nombre, grupo, retardos, faltas) VALUES (%s, %s, %s, %s)",
-                            (nombre, grupo, retardos, faltas)
+                            (nombre, grupo, retardos, faltas),
                         )
                         if cur.rowcount > 0:
                             insertados += 1
                         else:
                             omitidos += 1
+                    sincronizar_conteo_grupos(cur)
                     db.commit()
             except MySQLError as e:
                 messagebox.showerror("Error MySQL", str(e), parent=self.root)
@@ -1795,7 +2111,7 @@ class PanelDireccion:
                 f"Importa alumnos directamente al grupo {grupo_predefinido}.",
                 ["nombre", "retardos", "faltas"],
                 [["Isac Herrera Luz", "0", "0"], ["Valeria Ruiz Díaz", "1", "0"]],
-                procesar
+                procesar,
             )
         else:
             abrir_modal_carga_masiva(
@@ -1804,25 +2120,32 @@ class PanelDireccion:
                 "Importa múltiples alumnos en lote (retardos y faltas son opcionales).",
                 ["nombre", "grupo", "retardos", "faltas"],
                 [["Isac Herrera Luz", "5° A", "0", "0"], ["Valeria Ruiz Díaz", "5° A", "1", "0"]],
-                procesar
+                procesar,
             )
 
     def agregar_grupo(self):
-        datos = self.formulario_modal("Agregar grupo", [
-            ("Nombre del grupo", "", None),
-            ("Nombre del docente", "", None)
-        ])
+        datos = self.formulario_modal(
+            "Agregar grupo",
+            [
+                ("Nombre del grupo", "", None),
+                ("Nombre del docente", "", None),
+            ],
+        )
         if not datos:
             return
         try:
             with self.conectar(incluir_bd=True) as db:
                 cur = db.cursor()
-                cur.execute("INSERT INTO grupos (grupo, docente, alumnos) VALUES (%s, %s, 0)",
-                            (datos["Nombre del grupo"], datos["Nombre del docente"]))
+                cur.execute(
+                    "INSERT INTO grupos (grupo, docente, alumnos) VALUES (%s, %s, 0)",
+                    (datos["Nombre del grupo"], datos["Nombre del docente"]),
+                )
                 db.commit()
             self.mostrar("Grupos y Docentes")
         except IntegrityError:
             messagebox.showwarning("Grupo existente", "Ese grupo ya está registrado.")
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
 
     def editar_grupo(self):
         nb = getattr(self, "notebook_grupos", None)
@@ -1835,24 +2158,63 @@ class PanelDireccion:
             messagebox.showwarning("Selecciona", "Selecciona la pestaña del grupo que deseas editar.")
             return
         grupo_original, docente_actual = datos_pestanas[pestana_actual]
-        datos = self.formulario_modal("Editar grupo", [
-            ("Nombre del grupo", grupo_original, None),
-            ("Nombre del docente", docente_actual, None)
-        ])
+        datos = self.formulario_modal(
+            "Editar grupo",
+            [
+                ("Nombre del grupo", grupo_original, None),
+                ("Nombre del docente", docente_actual, None),
+            ],
+        )
         if not datos:
             return
         try:
             with self.conectar(incluir_bd=True) as db:
                 cur = db.cursor()
-                cur.execute("UPDATE grupos SET grupo=%s, docente=%s WHERE grupo=%s",
-                            (datos["Nombre del grupo"], datos["Nombre del docente"], grupo_original))
+                cur.execute(
+                    "UPDATE grupos SET grupo=%s, docente=%s WHERE grupo=%s",
+                    (datos["Nombre del grupo"], datos["Nombre del docente"], grupo_original),
+                )
                 if datos["Nombre del grupo"] != grupo_original:
-                    cur.execute("UPDATE alumnos SET grupo=%s WHERE grupo=%s",
-                                (datos["Nombre del grupo"], grupo_original))
+                    cur.execute(
+                        "UPDATE alumnos SET grupo=%s WHERE grupo=%s",
+                        (datos["Nombre del grupo"], grupo_original),
+                    )
+                sincronizar_conteo_grupos(cur)
                 db.commit()
             self.mostrar("Grupos y Docentes")
         except IntegrityError:
             messagebox.showwarning("Nombre duplicado", "Ya existe un grupo con ese nombre.")
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
+
+    def eliminar_grupo(self):
+        nb = getattr(self, "notebook_grupos", None)
+        datos_pestanas = getattr(self, "_datos_grupos_pestanas", {})
+        if not nb or not nb.tabs() or not datos_pestanas:
+            messagebox.showwarning("Sin grupos", "No hay ningún grupo disponible para eliminar.")
+            return
+        pestana_actual = nb.tab(nb.select(), "text")
+        if pestana_actual not in datos_pestanas:
+            return
+        grupo_sel, _ = datos_pestanas[pestana_actual]
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("SELECT COUNT(*) FROM alumnos WHERE grupo=%s", (grupo_sel,))
+                cant_al = int(cur.fetchone()[0] or 0)
+                if cant_al > 0:
+                    messagebox.showwarning(
+                        "Grupo con alumnos",
+                        f"El grupo '{grupo_sel}' tiene {cant_al} alumno(s) asignado(s). Reasigna o elimina primero sus alumnos.",
+                    )
+                    return
+                if not messagebox.askyesno("Eliminar grupo", f"¿Deseas eliminar el grupo '{grupo_sel}'?"):
+                    return
+                cur.execute("DELETE FROM grupos WHERE grupo=%s", (grupo_sel,))
+                db.commit()
+            self.mostrar("Grupos y Docentes")
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
 
     def alumno_seleccionado(self, tabla=None):
         tabla = tabla or getattr(self, "tabla_alumnos", None)
@@ -1865,13 +2227,18 @@ class PanelDireccion:
         if not datos:
             return
         nota = datos[f"Nota para {nombre}"]
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("INSERT INTO seguimientos (alumno_id, fecha, nota) VALUES (%s, %s, %s)",
-                        (alumno_id, date.today().isoformat(), nota))
-            db.commit()
-        messagebox.showinfo("Guardado", "La nota se registró correctamente.")
-        self.mostrar(self.pagina)
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    "INSERT INTO seguimientos (alumno_id, fecha, nota) VALUES (%s, %s, %s)",
+                    (alumno_id, date.today().isoformat(), nota),
+                )
+                db.commit()
+            messagebox.showinfo("Guardado", "La nota se registró correctamente.")
+            self.mostrar(self.pagina)
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
 
     def pagina_comunicados(self):
         sec = self.seccion(self.contenido, "Módulo de Comunicados y Avisos Oficiales")
@@ -1880,26 +2247,56 @@ class PanelDireccion:
 
         sec_list = self.seccion(self.contenido, "Historial de Comunicados Emitidos")
         sec_list.pack(fill="both", padx=18, pady=6)
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT id, fecha, titulo, mensaje FROM comunicados ORDER BY id DESC")
-            rows = cur.fetchall()
-        self.crear_tabla(sec_list.body, ("ID", "Fecha", "Título", "Mensaje"), rows, {"Título": 160, "Mensaje": 240}, 6)
+        rows = []
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("SELECT id, fecha, titulo, mensaje FROM comunicados ORDER BY id DESC")
+                rows = cur.fetchall()
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
+        tabla_com = self.crear_tabla(sec_list.body, ("ID", "Fecha", "Título", "Mensaje"), rows, {"Título": 160, "Mensaje": 240}, 6)
+
+        def eliminar_comunicado():
+            if not tabla_com.selection():
+                messagebox.showwarning("Selecciona", "Selecciona un comunicado.")
+                return
+            ident = tabla_com.item(tabla_com.selection()[0], "values")[0]
+            if not messagebox.askyesno("Eliminar", "¿Deseas eliminar el comunicado seleccionado?"):
+                return
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute("DELETE FROM comunicados WHERE id=%s", (ident,))
+                    db.commit()
+                self.mostrar("Comunicados Oficiales")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
+
+        self.boton(sec_list.body, "Eliminar comunicado", eliminar_comunicado, self.RED, "#FFFFFF").pack(anchor="w", pady=(8, 0))
 
     def agregar_comunicado(self):
-        datos = self.formulario_modal("Nuevo Comunicado", [
-            ("Título del aviso", "", None),
-            ("Mensaje detallado", "", None)
-        ])
+        datos = self.formulario_modal(
+            "Nuevo Comunicado",
+            [
+                ("Título del aviso", "", None),
+                ("Mensaje detallado", "", None),
+            ],
+        )
         if not datos:
             return
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("INSERT INTO comunicados (fecha, titulo, mensaje) VALUES (%s, %s, %s)",
-                        (date.today().isoformat(), datos["Título del aviso"], datos["Mensaje detallado"]))
-            db.commit()
-        messagebox.showinfo("Enviado", "El comunicado se ha registrado.")
-        self.mostrar("Comunicados Oficiales")
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    "INSERT INTO comunicados (fecha, titulo, mensaje) VALUES (%s, %s, %s)",
+                    (date.today().isoformat(), datos["Título del aviso"], datos["Mensaje detallado"]),
+                )
+                db.commit()
+            messagebox.showinfo("Enviado", "El comunicado se ha registrado.")
+            self.mostrar("Comunicados Oficiales")
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
 
     def pagina_bitacora(self):
         sec = self.seccion(self.contenido, "Bitácora Directiva")
@@ -1909,33 +2306,67 @@ class PanelDireccion:
             datos = self.formulario_modal("Nueva Nota de Bitácora", [("Descripción del evento", "", None)])
             if not datos:
                 return
-            with self.conectar(incluir_bd=True) as db:
-                cur = db.cursor()
-                cur.execute("INSERT INTO bitacora (fecha, entrada) VALUES (%s, %s)",
-                            (date.today().isoformat(), datos["Descripción del evento"]))
-                db.commit()
-            messagebox.showinfo("Guardado", "Entrada agregada.")
-            self.mostrar("Bitácora Directiva")
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute(
+                        "INSERT INTO bitacora (fecha, entrada) VALUES (%s, %s)",
+                        (date.today().isoformat(), datos["Descripción del evento"]),
+                    )
+                    db.commit()
+                messagebox.showinfo("Guardado", "Entrada agregada.")
+                self.mostrar("Bitácora Directiva")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
 
         self.boton(sec.body, "＋ Nueva entrada en bitácora", agregar_entrada, self.GOLD, "#FFFFFF").pack(anchor="w")
 
         sec_list = self.seccion(self.contenido, "Registro Histórico de Bitácora")
         sec_list.pack(fill="both", padx=18, pady=6)
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT id, fecha, entrada FROM bitacora ORDER BY id DESC")
-            rows = cur.fetchall()
-        self.crear_tabla(sec_list.body, ("ID", "Fecha", "Entrada"), rows, {"Entrada": 280}, 6)
+        rows = []
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("SELECT id, fecha, entrada FROM bitacora ORDER BY id DESC")
+                rows = cur.fetchall()
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
+        tabla_bit = self.crear_tabla(sec_list.body, ("ID", "Fecha", "Entrada"), rows, {"Entrada": 280}, 6)
+
+        def eliminar_entrada():
+            if not tabla_bit.selection():
+                messagebox.showwarning("Selecciona", "Selecciona una entrada de la bitácora.")
+                return
+            ident = tabla_bit.item(tabla_bit.selection()[0], "values")[0]
+            if not messagebox.askyesno("Eliminar", "¿Deseas eliminar esta entrada?"):
+                return
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute("DELETE FROM bitacora WHERE id=%s", (ident,))
+                    db.commit()
+                self.mostrar("Bitácora Directiva")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
+
+        self.boton(sec_list.body, "Eliminar entrada", eliminar_entrada, self.RED, "#FFFFFF").pack(anchor="w", pady=(8, 0))
 
     def resumen_alertas(self, parent, limite=None):
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT COUNT(*) FROM alumnos WHERE faltas >= %s OR retardos >= %s", (UMBRAL_FALTAS, UMBRAL_FALTAS))
-            alumnos = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM justificantes WHERE estado='Pendiente'")
-            just = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM incidencias WHERE estado='Pendiente'")
-            inc = cur.fetchone()[0]
+        alumnos = just = inc = 0
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    "SELECT COUNT(*) FROM alumnos WHERE faltas >= %s OR retardos >= %s",
+                    (UMBRAL_FALTAS, UMBRAL_FALTAS),
+                )
+                alumnos = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM justificantes WHERE estado='Pendiente'")
+                just = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM incidencias WHERE estado='Pendiente'")
+                inc = cur.fetchone()[0]
+        except MySQLError:
+            pass
         items = []
         if alumnos:
             items.append((f"{alumnos} alumnos con alertas", "Revisar faltas o retardos.", self.RED_SOFT, "Módulo de Alertas"))
@@ -1947,9 +2378,8 @@ class PanelDireccion:
             items.append(("Sin alertas pendientes", "Todo en orden.", self.GREEN_SOFT, "Módulo de Alertas"))
 
         fg_alt = self.TEXT_SOFT
-        for title, detail, color, dest in (items[:limite] if limite else items):
-            f = tk.Frame(parent, bg=color, padx=10, pady=8,
-                         highlightbackground=self.BORDER, highlightthickness=1)
+        for title, detail, color, dest in items[:limite] if limite else items:
+            f = tk.Frame(parent, bg=color, padx=10, pady=8, highlightbackground=self.BORDER, highlightthickness=1)
             f.pack(fill="x", pady=3)
             tk.Label(f, text=title, bg=color, fg=fg_alt, font=("Segoe UI", 8, "bold"), wraplength=260, justify="left").pack(anchor="w")
             tk.Label(f, text=detail, bg=color, fg=fg_alt, font=("Segoe UI", 8), wraplength=260, justify="left").pack(anchor="w", pady=(1, 4))
@@ -1969,13 +2399,31 @@ class PanelDireccion:
         ttk.Combobox(box_reg, textvariable=alumno_var, values=list(opts), state="readonly").pack(fill="x", pady=(2, 8))
 
         tk.Label(box_reg, text="Tipo de incidencia", bg=self.WHITE, fg=self.TEXT_MAIN, font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        ent_tipo = tk.Entry(box_reg, font=("Segoe UI", 9), bg=self.WHITE, fg=self.TEXT_MAIN,
-                            relief="flat", highlightthickness=1, highlightbackground=self.BORDER, highlightcolor=self.PURPLE, bd=0)
+        ent_tipo = tk.Entry(
+            box_reg,
+            font=("Segoe UI", 9),
+            bg=self.WHITE,
+            fg=self.TEXT_MAIN,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=self.BORDER,
+            highlightcolor=self.PURPLE,
+            bd=0,
+        )
         ent_tipo.pack(fill="x", ipady=5, pady=(2, 8))
 
         tk.Label(box_reg, text="Descripción", bg=self.WHITE, fg=self.TEXT_MAIN, font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        ent_desc = tk.Entry(box_reg, font=("Segoe UI", 9), bg=self.WHITE, fg=self.TEXT_MAIN,
-                            relief="flat", highlightthickness=1, highlightbackground=self.BORDER, highlightcolor=self.PURPLE, bd=0)
+        ent_desc = tk.Entry(
+            box_reg,
+            font=("Segoe UI", 9),
+            bg=self.WHITE,
+            fg=self.TEXT_MAIN,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=self.BORDER,
+            highlightcolor=self.PURPLE,
+            bd=0,
+        )
         ent_desc.pack(fill="x", ipady=5, pady=(2, 8))
 
         def guardar_incidencia():
@@ -1985,41 +2433,75 @@ class PanelDireccion:
             if not alumno_id or not tipo or not desc:
                 messagebox.showwarning("Incompletos", "Selecciona un alumno y completa tipo y descripción.")
                 return
-            with self.conectar(incluir_bd=True) as db:
-                cur = db.cursor()
-                cur.execute("INSERT INTO incidencias (alumno_id, fecha, tipo, descripcion, estado) VALUES (%s, %s, %s, %s, 'Pendiente')",
-                            (alumno_id, date.today().isoformat(), tipo, desc))
-                db.commit()
-            messagebox.showinfo("Registrado", "Incidencia de conducta guardada.")
-            self.mostrar("Conducta / Incidencias")
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute(
+                        "INSERT INTO incidencias (alumno_id, fecha, tipo, descripcion, estado) VALUES (%s, %s, %s, %s, 'Pendiente')",
+                        (alumno_id, date.today().isoformat(), tipo, desc),
+                    )
+                    db.commit()
+                messagebox.showinfo("Registrado", "Incidencia de conducta guardada.")
+                self.mostrar("Conducta / Incidencias")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
 
         self.boton(box_reg, "＋ Guardar incidencia", guardar_incidencia, self.RED, "#FFFFFF").pack(anchor="w")
 
         sec_inc = self.seccion(self.contenido, "Historial de incidencias de conducta")
         sec_inc.pack(fill="both", expand=True, padx=18, pady=6)
         incbox = sec_inc.body
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("""
-                SELECT i.id, i.fecha, a.nombre, i.tipo, i.descripcion, i.estado
-                FROM incidencias i JOIN alumnos a ON a.id = i.alumno_id
-                ORDER BY i.id DESC
-            """)
-            incs = cur.fetchall()
+        incs = []
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    """
+                    SELECT i.id, i.fecha, a.nombre, i.tipo, i.descripcion, i.estado
+                    FROM incidencias i JOIN alumnos a ON a.id = i.alumno_id
+                    ORDER BY i.id DESC
+                    """
+                )
+                incs = cur.fetchall()
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
         itable = self.crear_tabla(incbox, ("ID", "Fecha", "Alumno", "Tipo", "Descripción", "Estado"), incs, {"Alumno": 140, "Tipo": 110, "Descripción": 200}, 6)
+
+        barra_inc = tk.Frame(incbox, bg=self.WHITE)
+        barra_inc.pack(fill="x", pady=(8, 0))
 
         def cerrar():
             if not itable.selection():
                 messagebox.showwarning("Selecciona", "Selecciona una incidencia.")
                 return
             ident = itable.item(itable.selection()[0], "values")[0]
-            with self.conectar(incluir_bd=True) as db:
-                cur = db.cursor()
-                cur.execute("UPDATE incidencias SET estado='Atendida' WHERE id=%s", (ident,))
-                db.commit()
-            self.mostrar("Conducta / Incidencias")
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute("UPDATE incidencias SET estado='Atendida' WHERE id=%s", (ident,))
+                    db.commit()
+                self.mostrar("Conducta / Incidencias")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
 
-        self.boton(incbox, "Marcar atendida", cerrar, self.GOLD, "#FFFFFF").pack(anchor="w", pady=(8, 0))
+        def eliminar_inc():
+            if not itable.selection():
+                messagebox.showwarning("Selecciona", "Selecciona una incidencia.")
+                return
+            ident = itable.item(itable.selection()[0], "values")[0]
+            if not messagebox.askyesno("Eliminar", "¿Deseas eliminar esta incidencia?"):
+                return
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute("DELETE FROM incidencias WHERE id=%s", (ident,))
+                    db.commit()
+                self.mostrar("Conducta / Incidencias")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
+
+        self.boton(barra_inc, "Marcar atendida", cerrar, self.GOLD, "#FFFFFF").pack(side="left", padx=(0, 6))
+        self.boton(barra_inc, "Eliminar", eliminar_inc, self.RED, "#FFFFFF").pack(side="left")
 
     def pagina_cartas_compromiso(self):
         """Pestaña dedicada exclusivamente a Cartas Compromiso y acuerdos de mejora."""
@@ -2027,13 +2509,26 @@ class PanelDireccion:
         sec_cc.pack(fill="both", expand=True, padx=18, pady=(14, 6))
         box = sec_cc.body
 
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute(
-                "SELECT id, nombre, grupo, retardos, faltas FROM alumnos WHERE faltas >= %s OR retardos >= %s ORDER BY faltas DESC, retardos DESC",
-                (UMBRAL_FALTAS, UMBRAL_FALTAS)
-            )
-            rows = cur.fetchall()
+        rows = []
+        seg_rows = []
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    "SELECT id, nombre, grupo, retardos, faltas FROM alumnos WHERE faltas >= %s OR retardos >= %s ORDER BY faltas DESC, retardos DESC",
+                    (UMBRAL_FALTAS, UMBRAL_FALTAS),
+                )
+                rows = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT s.id, s.fecha, a.nombre, a.grupo, s.nota
+                    FROM seguimientos s JOIN alumnos a ON a.id = s.alumno_id
+                    ORDER BY s.id DESC LIMIT 30
+                    """
+                )
+                seg_rows = cur.fetchall()
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
 
         filas = [
             (i, n, g, r, f, "Carta compromiso por faltas" if f >= UMBRAL_FALTAS else "Carta compromiso por retardos")
@@ -2049,32 +2544,27 @@ class PanelDireccion:
             if not a:
                 messagebox.showwarning("Selecciona", "Selecciona un alumno de la tabla.")
                 return
-            datos = self.formulario_modal("Registrar Carta Compromiso", [
-                ("Compromiso acordado", "", None)
-            ])
+            datos = self.formulario_modal("Registrar Carta Compromiso", [("Compromiso acordado", "", None)])
             if not datos:
                 return
             nota = f"[CARTA COMPROMISO] {datos['Compromiso acordado']}"
-            with self.conectar(incluir_bd=True) as db:
-                cur = db.cursor()
-                cur.execute("INSERT INTO seguimientos (alumno_id, fecha, nota) VALUES (%s, %s, %s)",
-                            (int(a[0]), date.today().isoformat(), nota))
-                db.commit()
-            messagebox.showinfo("Guardado", "Carta compromiso registrada en seguimiento.")
-            self.mostrar("Cartas Compromiso")
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute(
+                        "INSERT INTO seguimientos (alumno_id, fecha, nota) VALUES (%s, %s, %s)",
+                        (int(a[0]), date.today().isoformat(), nota),
+                    )
+                    db.commit()
+                messagebox.showinfo("Guardado", "Carta compromiso registrada en seguimiento.")
+                self.mostrar("Cartas Compromiso")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
 
         self.boton(actions, "＋ Registrar carta compromiso", registrar_carta, self.GOLD, "#FFFFFF").pack(side="left")
 
         sec_seg = self.seccion(self.contenido, "Seguimientos y cartas compromiso registrados")
         sec_seg.pack(fill="both", expand=True, padx=18, pady=6)
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("""
-                SELECT s.id, s.fecha, a.nombre, a.grupo, s.nota
-                FROM seguimientos s JOIN alumnos a ON a.id = s.alumno_id
-                ORDER BY s.id DESC LIMIT 30
-            """)
-            seg_rows = cur.fetchall()
         self.crear_tabla(sec_seg.body, ("ID", "Fecha", "Alumno", "Grupo", "Acuerdo / Nota"), seg_rows, {"Alumno": 150, "Acuerdo / Nota": 260}, 5)
 
     def pagina_alertas(self):
@@ -2086,13 +2576,21 @@ class PanelDireccion:
         sec_box = self.seccion(self.contenido, "Alumnos con alertas de asistencia (3 retardos = 1 falta)")
         sec_box.pack(fill="both", padx=18, pady=6)
         box = sec_box.body
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute(
-                "SELECT id, nombre, grupo, retardos, faltas FROM alumnos WHERE faltas >= %s OR retardos >= %s ORDER BY faltas DESC, retardos DESC",
-                (UMBRAL_FALTAS, UMBRAL_FALTAS)
-            )
-            rows = cur.fetchall()
+        rows = []
+        just_rows = []
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    "SELECT id, nombre, grupo, retardos, faltas FROM alumnos WHERE faltas >= %s OR retardos >= %s ORDER BY faltas DESC, retardos DESC",
+                    (UMBRAL_FALTAS, UMBRAL_FALTAS),
+                )
+                rows = cur.fetchall()
+                cur.execute("SELECT id, alumno, grupo, fecha, motivo, estado FROM justificantes ORDER BY id DESC")
+                just_rows = cur.fetchall()
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
+
         filas = [(i, n, g, r, f, "Faltas" if f >= UMBRAL_FALTAS else "Retardos") for i, n, g, r, f in rows]
         table = self.crear_tabla(box, ("ID", "Alumno", "Grupo", "Retardos", "Faltas", "Motivo"), filas, {"Alumno": 150, "Motivo": 110}, 5)
         fg_tag = self.TEXT_SOFT
@@ -2105,24 +2603,43 @@ class PanelDireccion:
         sec_just = self.seccion(self.contenido, "Justificantes pendientes de validación")
         sec_just.pack(fill="both", padx=18, pady=6)
         jbox = sec_just.body
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT id, alumno, grupo, fecha, motivo, estado FROM justificantes ORDER BY id DESC")
-            just_rows = cur.fetchall()
         jtable = self.crear_tabla(jbox, ("ID", "Alumno", "Grupo", "Fecha", "Motivo", "Estado"), just_rows, {"Alumno": 140, "Motivo": 200}, 5)
+
+        barra_j = tk.Frame(jbox, bg=self.WHITE)
+        barra_j.pack(fill="x", pady=(8, 0))
 
         def validar_justificante():
             if not jtable.selection():
                 messagebox.showwarning("Selecciona", "Selecciona un justificante.")
                 return
             ident = jtable.item(jtable.selection()[0], "values")[0]
-            with self.conectar(incluir_bd=True) as db:
-                cur = db.cursor()
-                cur.execute("UPDATE justificantes SET estado='Validado' WHERE id=%s", (ident,))
-                db.commit()
-            self.mostrar("Módulo de Alertas")
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute("UPDATE justificantes SET estado='Validado' WHERE id=%s", (ident,))
+                    db.commit()
+                self.mostrar("Módulo de Alertas")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
 
-        self.boton(jbox, "Validar justificante", validar_justificante, self.GOLD, "#FFFFFF").pack(anchor="w", pady=(8, 0))
+        def eliminar_justificante():
+            if not jtable.selection():
+                messagebox.showwarning("Selecciona", "Selecciona un justificante.")
+                return
+            ident = jtable.item(jtable.selection()[0], "values")[0]
+            if not messagebox.askyesno("Eliminar", "¿Deseas eliminar este justificante?"):
+                return
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute("DELETE FROM justificantes WHERE id=%s", (ident,))
+                    db.commit()
+                self.mostrar("Módulo de Alertas")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
+
+        self.boton(barra_j, "Validar justificante", validar_justificante, self.GOLD, "#FFFFFF").pack(side="left", padx=(0, 6))
+        self.boton(barra_j, "Eliminar justificante", eliminar_justificante, self.RED, "#FFFFFF").pack(side="left")
 
     def _cambiar_mes_calendario(self, delta):
         mes = self.cal_mes + delta
@@ -2156,14 +2673,20 @@ class PanelDireccion:
         self.boton(barra_mes, "◀ Mes anterior", lambda: self._cambiar_mes_calendario(-1), self.DARK, self.TEXT_NAV).pack(side="left", padx=(0, 6))
         self.boton(barra_mes, "Mes siguiente ▶", lambda: self._cambiar_mes_calendario(1), self.DARK, self.TEXT_NAV).pack(side="left", padx=(0, 6))
         self.boton(barra_mes, "Hoy", self._ir_hoy_calendario, self.LAVENDER, self.TEXT_SOFT).pack(side="left", padx=(0, 12))
-        tk.Label(barra_mes, text=f"{nombre_mes} {self.cal_anio}", bg=self.WHITE, fg=self.PURPLE,
-                 font=("Segoe UI", 12, "bold")).pack(side="left")
+        tk.Label(barra_mes, text=f"{nombre_mes} {self.cal_anio}", bg=self.WHITE, fg=self.PURPLE, font=("Segoe UI", 12, "bold")).pack(side="left")
         self.boton(barra_mes, "＋ Agregar evento", self.agregar_evento, self.GOLD, "#FFFFFF").pack(side="right")
 
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT fecha, titulo FROM eventos ORDER BY fecha")
-            todos_eventos = cur.fetchall()
+        todos_eventos = []
+        rows = []
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("SELECT fecha, titulo FROM eventos ORDER BY fecha")
+                todos_eventos = cur.fetchall()
+                cur.execute("SELECT id, fecha, titulo FROM eventos ORDER BY fecha")
+                rows = cur.fetchall()
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
 
         eventos_por_fecha = {}
         for f_ev, t_ev in todos_eventos:
@@ -2174,10 +2697,9 @@ class PanelDireccion:
 
         for col_idx, dia_nom in enumerate(DIAS_ES):
             grid_cal.grid_columnconfigure(col_idx, weight=1, uniform="cal_cols")
-            tk.Label(
-                grid_cal, text=dia_nom, bg=self.NAVY, fg=self.TEXT_NAV,
-                font=("Segoe UI", 9, "bold"), pady=8
-            ).grid(row=0, column=col_idx, sticky="nsew", padx=1, pady=1)
+            tk.Label(grid_cal, text=dia_nom, bg=self.NAVY, fg=self.TEXT_NAV, font=("Segoe UI", 9, "bold"), pady=8).grid(
+                row=0, column=col_idx, sticky="nsew", padx=1, pady=1
+            )
 
         cal_obj = calendar.Calendar(firstweekday=0)
         semanas = cal_obj.monthdayscalendar(self.cal_anio, self.cal_mes)
@@ -2193,7 +2715,7 @@ class PanelDireccion:
 
                 fecha_iso = f"{self.cal_anio:04d}-{self.cal_mes:02d}-{dia_num:02d}"
                 evs_dia = eventos_por_fecha.get(fecha_iso, [])
-                es_hoy = (dia_num == hoy.day and self.cal_mes == hoy.month and self.cal_anio == hoy.year)
+                es_hoy = dia_num == hoy.day and self.cal_mes == hoy.month and self.cal_anio == hoy.year
 
                 bg_celda = self.BLUE_SOFT if es_hoy else (self.GREEN_SOFT if evs_dia else self.WHITE)
                 celda = tk.Frame(grid_cal, bg=bg_celda, height=95, cursor="hand2")
@@ -2207,32 +2729,35 @@ class PanelDireccion:
                     text=f"{dia_num} · Hoy" if es_hoy else str(dia_num),
                     bg=bg_celda,
                     fg=self.PURPLE if es_hoy else self.TEXT_MAIN,
-                    font=("Segoe UI", 10, "bold")
+                    font=("Segoe UI", 10, "bold"),
                 )
                 lbl_dia.pack(side="left")
 
+                lbl_ev = None
                 if evs_dia:
                     resumen_ev = evs_dia[0] if len(evs_dia) == 1 else f"{evs_dia[0]} (+{len(evs_dia) - 1})"
                     lbl_ev = tk.Label(
-                        celda, text=resumen_ev, bg=bg_celda, fg=self.TEXT_SOFT,
-                        font=("Segoe UI", 8, "bold"), anchor="w", justify="left",
-                        wraplength=160, padx=8
+                        celda,
+                        text=resumen_ev,
+                        bg=bg_celda,
+                        fg=self.TEXT_SOFT,
+                        font=("Segoe UI", 8, "bold"),
+                        anchor="w",
+                        justify="left",
+                        wraplength=160,
+                        padx=8,
                     )
                     lbl_ev.pack(fill="x", anchor="w")
 
                 def _clic_fecha(e, f_sel=fecha_iso):
                     self.agregar_evento(fecha_inicial=f_sel)
 
-                for w_c in ([celda, top_celda, lbl_dia] + ([lbl_ev] if evs_dia else [])):
+                for w_c in [celda, top_celda, lbl_dia] + ([lbl_ev] if lbl_ev else []):
                     w_c.bind("<Button-1>", _clic_fecha)
 
         sec_list = self.seccion(self.contenido, "Eventos Registrados")
         sec_list.pack(fill="both", expand=True, padx=18, pady=6)
         listing = sec_list.body
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT id, fecha, titulo FROM eventos ORDER BY fecha")
-            rows = cur.fetchall()
         table = self.crear_tabla(listing, ("ID", "Fecha", "Evento"), rows, {"Evento": 240}, 6)
         actions = tk.Frame(listing, bg=self.WHITE)
         actions.pack(fill="x", pady=(8, 0))
@@ -2241,7 +2766,13 @@ class PanelDireccion:
 
     def agregar_evento(self, fecha_inicial=None):
         fecha_def = fecha_inicial or f"{self.cal_anio:04d}-{self.cal_mes:02d}-{min(date.today().day, calendar.monthrange(self.cal_anio, self.cal_mes)[1]):02d}"
-        datos = self.formulario_modal("Agregar evento", [("Fecha (AAAA-MM-DD)", fecha_def, None), ("Nombre del evento", "", None)])
+        datos = self.formulario_modal(
+            "Agregar evento",
+            [
+                ("Fecha (AAAA-MM-DD)", fecha_def, None),
+                ("Nombre del evento", "", None),
+            ],
+        )
         if not datos:
             return
         try:
@@ -2249,19 +2780,30 @@ class PanelDireccion:
         except ValueError:
             messagebox.showwarning("Formato", "Usa el formato AAAA-MM-DD.")
             return
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("INSERT INTO eventos (fecha, titulo) VALUES (%s, %s)",
-                        (datos["Fecha (AAAA-MM-DD)"], datos["Nombre del evento"]))
-            db.commit()
-        self.mostrar("Calendario Oficial")
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    "INSERT INTO eventos (fecha, titulo) VALUES (%s, %s)",
+                    (datos["Fecha (AAAA-MM-DD)"], datos["Nombre del evento"]),
+                )
+                db.commit()
+            self.mostrar("Calendario Oficial")
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
 
     def editar_evento(self, table):
         if not table.selection():
             messagebox.showwarning("Selecciona", "Selecciona un evento.")
             return
         fila = table.item(table.selection()[0], "values")
-        datos = self.formulario_modal("Editar evento", [("Fecha (AAAA-MM-DD)", str(fila[1]), None), ("Nombre del evento", fila[2], None)])
+        datos = self.formulario_modal(
+            "Editar evento",
+            [
+                ("Fecha (AAAA-MM-DD)", str(fila[1]), None),
+                ("Nombre del evento", fila[2], None),
+            ],
+        )
         if not datos:
             return
         try:
@@ -2269,12 +2811,17 @@ class PanelDireccion:
         except ValueError:
             messagebox.showwarning("Formato", "Usa el formato AAAA-MM-DD.")
             return
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("UPDATE eventos SET fecha=%s, titulo=%s WHERE id=%s",
-                        (datos["Fecha (AAAA-MM-DD)"], datos["Nombre del evento"], fila[0]))
-            db.commit()
-        self.mostrar("Calendario Oficial")
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    "UPDATE eventos SET fecha=%s, titulo=%s WHERE id=%s",
+                    (datos["Fecha (AAAA-MM-DD)"], datos["Nombre del evento"], fila[0]),
+                )
+                db.commit()
+            self.mostrar("Calendario Oficial")
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
 
     def eliminar_evento(self, table):
         if not table.selection():
@@ -2282,11 +2829,14 @@ class PanelDireccion:
             return
         ident = table.item(table.selection()[0], "values")[0]
         if messagebox.askyesno("Eliminar", "¿Deseas eliminar el evento?"):
-            with self.conectar(incluir_bd=True) as db:
-                cur = db.cursor()
-                cur.execute("DELETE FROM eventos WHERE id=%s", (ident,))
-                db.commit()
-            self.mostrar("Calendario Oficial")
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute("DELETE FROM eventos WHERE id=%s", (ident,))
+                    db.commit()
+                self.mostrar("Calendario Oficial")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
 
     def pagina_reportes(self):
         sec = self.seccion(self.contenido, "Reportes y exportación")
@@ -2306,14 +2856,25 @@ class PanelDireccion:
 
     def exportar_csv(self):
         try:
-            ruta = os.path.join(BASE_DIR, "reporte_asistencia.csv")
+            ruta = filedialog.asksaveasfilename(
+                parent=self.root,
+                title="Guardar historial de asistencia",
+                defaultextension=".csv",
+                initialdir=BASE_DIR,
+                initialfile="reporte_asistencia.csv",
+                filetypes=[("Archivos CSV", "*.csv")],
+            )
+            if not ruta:
+                return
             with self.conectar(incluir_bd=True) as db:
                 cur = db.cursor()
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT a.fecha, al.id, al.nombre, al.grupo, a.estado
                     FROM asistencias a JOIN alumnos al ON al.id = a.alumno_id
                     ORDER BY a.fecha DESC
-                """)
+                    """
+                )
                 rows = cur.fetchall()
             with open(ruta, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
@@ -2325,7 +2886,16 @@ class PanelDireccion:
 
     def exportar_alumnos(self):
         try:
-            ruta = os.path.join(BASE_DIR, "lista_alumnos.csv")
+            ruta = filedialog.asksaveasfilename(
+                parent=self.root,
+                title="Guardar lista de alumnos",
+                defaultextension=".csv",
+                initialdir=BASE_DIR,
+                initialfile="lista_alumnos.csv",
+                filetypes=[("Archivos CSV", "*.csv")],
+            )
+            if not ruta:
+                return
             with open(ruta, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
                 writer.writerow(["ID", "Nombre", "Grupo", "Retardos", "Faltas"])
@@ -2352,24 +2922,40 @@ class PanelDireccion:
         box = sec.body
         fg_c = self.TEXT_MAIN
         tk.Label(box, text="Regla de asistencia", bg=self.WHITE, fg=fg_c, font=("Segoe UI", 9, "bold")).pack(anchor="w")
-        tk.Label(box, text="3 retardos equivalen a 1 falta. Alertas automáticas al llegar a 3 faltas.",
-                 bg=self.LAVENDER, fg=self.TEXT_SOFT, padx=10, pady=8, justify="left", wraplength=340).pack(fill="x", pady=(4, 10))
+        tk.Label(
+            box,
+            text="3 retardos equivalen a 1 falta. Alertas automáticas al llegar a 3 faltas.",
+            bg=self.LAVENDER,
+            fg=self.TEXT_SOFT,
+            padx=10,
+            pady=8,
+            justify="left",
+            wraplength=340,
+        ).pack(fill="x", pady=(4, 10))
         tk.Label(box, text="Base de datos principal MySQL", bg=self.WHITE, fg=fg_c, font=("Segoe UI", 9, "bold")).pack(anchor="w")
-        tk.Label(box, text=f"{MYSQL_CONFIG['host']} / {DB_NOMBRE}", bg=self.WHITE, fg=self.MUTED, wraplength=340, justify="left").pack(anchor="w", pady=(2, 10))
+        tk.Label(
+            box,
+            text=f"{MYSQL_CONFIG['host']} / {DB_NOMBRE}",
+            bg=self.WHITE,
+            fg=self.MUTED,
+            wraplength=340,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 10))
         self.boton(box, "Volver al inicio", lambda: self.mostrar("Inicio"), self.PURPLE, "#FFFFFF").pack(anchor="w")
 
 
 class PanelDocente:
-    def __init__(self, root, docente_nombre, modo_oscuro=False, grupo_fijo=None, colores_personalizados=None):
+    def __init__(self, root, docente_nombre, modo_oscuro=False, grupo_fijo=None, colores_personalizados=None, usuario_login=None):
         self.root = root
         self.docente_nombre = docente_nombre
+        self.usuario_login = usuario_login or docente_nombre
         self.grupo_fijo = grupo_fijo
         self.modo_oscuro = modo_oscuro
         self.colores_personalizados = colores_personalizados
         self.actualizar_colores()
 
         etiqueta_grupo = f" - Grupo {grupo_fijo}" if grupo_fijo else ""
-        self.root.title(f"Primaria Nezahualcóyotl | Panel Docente - {docente_nombre}{etiqueta_grupo}")
+        self.root.title(f"Primaria Nezahualcóyotl | Panel Docente - {self.usuario_login} ({docente_nombre}){etiqueta_grupo}")
         self.root.minsize(320, 480)
         self.root.configure(bg=self.BG)
         maximizar_ventana(self.root)
@@ -2422,18 +3008,22 @@ class PanelDocente:
         if self.grupo_fijo:
             self.grupos = [self.grupo_fijo]
             return
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            if self.docente_nombre.lower() in ("docente", "todos"):
-                cur.execute("SELECT grupo FROM grupos ORDER BY grupo LIMIT 1")
-            else:
-                cur.execute("SELECT grupo FROM grupos WHERE LOWER(docente) LIKE LOWER(%s) ORDER BY grupo LIMIT 1", (f"%{self.docente_nombre}%",))
-            self.grupos = [row[0] for row in cur.fetchall()]
-        if not self.grupos:
+        try:
             with self.conectar(incluir_bd=True) as db:
                 cur = db.cursor()
-                cur.execute("SELECT grupo FROM grupos LIMIT 1")
+                if self.docente_nombre.lower() in ("docente", "todos"):
+                    cur.execute("SELECT grupo FROM grupos ORDER BY id ASC LIMIT 1")
+                else:
+                    cur.execute(
+                        "SELECT grupo FROM grupos WHERE LOWER(docente) LIKE LOWER(%s) ORDER BY id ASC LIMIT 1",
+                        (f"%{self.docente_nombre}%",),
+                    )
                 self.grupos = [row[0] for row in cur.fetchall()]
+                if not self.grupos:
+                    cur.execute("SELECT grupo FROM grupos ORDER BY id ASC LIMIT 1")
+                    self.grupos = [row[0] for row in cur.fetchall()]
+        except MySQLError:
+            self.grupos = []
         if self.grupos:
             self.grupo_fijo = self.grupos[0]
 
@@ -2449,19 +3039,40 @@ class PanelDocente:
         header_bg = self.DARK if self.modo_oscuro else "#F8FAFC"
         header_fg = self.TEAL if self.modo_oscuro else "#334155"
 
-        s.configure("Treeview", background=bg_tabla, foreground=fg_tabla,
-                    fieldbackground=bg_tabla, rowheight=34, borderwidth=0, font=("Segoe UI", 9))
-        s.configure("Treeview.Heading", background=header_bg, foreground=header_fg,
-                    font=("Segoe UI", 9, "bold"), padding=(8, 8), relief="flat")
+        s.configure(
+            "Treeview",
+            background=bg_tabla,
+            foreground=fg_tabla,
+            fieldbackground=bg_tabla,
+            rowheight=34,
+            borderwidth=0,
+            font=("Segoe UI", 9),
+        )
+        s.configure(
+            "Treeview.Heading",
+            background=header_bg,
+            foreground=header_fg,
+            font=("Segoe UI", 9, "bold"),
+            padding=(8, 8),
+            relief="flat",
+        )
         s.map("Treeview", background=[("selected", self.PURPLE)], foreground=[("selected", "#FFFFFF")])
-        s.configure("TCombobox", padding=6, font=("Segoe UI", 9),
-                    fieldbackground=bg_tabla, background=header_bg,
-                    foreground=fg_tabla, arrowcolor=fg_tabla)
-        s.map("TCombobox",
-              fieldbackground=[("readonly", bg_tabla)],
-              foreground=[("readonly", fg_tabla)],
-              selectbackground=[("readonly", self.PURPLE)],
-              selectforeground=[("readonly", "#FFFFFF")])
+        s.configure(
+            "TCombobox",
+            padding=6,
+            font=("Segoe UI", 9),
+            fieldbackground=bg_tabla,
+            background=header_bg,
+            foreground=fg_tabla,
+            arrowcolor=fg_tabla,
+        )
+        s.map(
+            "TCombobox",
+            fieldbackground=[("readonly", bg_tabla)],
+            foreground=[("readonly", fg_tabla)],
+            selectbackground=[("readonly", self.PURPLE)],
+            selectforeground=[("readonly", "#FFFFFF")],
+        )
         self.root.option_add("*TCombobox*Listbox.background", bg_tabla)
         self.root.option_add("*TCombobox*Listbox.foreground", fg_tabla)
         self.root.option_add("*TCombobox*Listbox.selectBackground", self.PURPLE)
@@ -2470,11 +3081,23 @@ class PanelDocente:
     def boton(self, parent, texto, comando, color=None, fg=None, compacto=True):
         col = color if color else self.PURPLE
         texto_col = fg if fg else "#FFFFFF"
-        b = tk.Button(parent, text=texto, command=comando, bg=col, fg=texto_col,
-                      activebackground=self.DARK, activeforeground="#FFFFFF",
-                      font=("Segoe UI", 8 if compacto else 9, "bold"), bd=0, padx=11, pady=6 if compacto else 8,
-                      cursor="hand2", wraplength=220, relief="flat", highlightthickness=0)
-        return b
+        return tk.Button(
+            parent,
+            text=texto,
+            command=comando,
+            bg=col,
+            fg=texto_col,
+            activebackground=self.DARK,
+            activeforeground="#FFFFFF",
+            font=("Segoe UI", 8 if compacto else 9, "bold"),
+            bd=0,
+            padx=11,
+            pady=6 if compacto else 8,
+            cursor="hand2",
+            wraplength=220,
+            relief="flat",
+            highlightthickness=0,
+        )
 
     def formulario_modal(self, titulo, campos):
         ventana = tk.Toplevel(self.root)
@@ -2483,7 +3106,7 @@ class PanelDocente:
         ventana.transient(self.root)
         ventana.grab_set()
         ventana.resizable(True, False)
-        ventana.geometry("430x{}".format(min(580, 210 + len(campos) * 72)))
+        ventana.geometry(f"430x{min(580, 210 + len(campos) * 72)}")
 
         franja = tk.Frame(ventana, bg=self.NAVY, padx=18, pady=12)
         franja.pack(fill="x")
@@ -2502,7 +3125,18 @@ class PanelDocente:
                 if valor is not None:
                     control.set(str(valor))
             else:
-                control = tk.Entry(cuerpo, font=("Segoe UI", 10), bg=self.WHITE, fg=fg_l, insertbackground=fg_l, relief="flat", highlightthickness=1, highlightbackground=self.BORDER, highlightcolor=self.PURPLE, bd=0)
+                control = tk.Entry(
+                    cuerpo,
+                    font=("Segoe UI", 10),
+                    bg=self.WHITE,
+                    fg=fg_l,
+                    insertbackground=fg_l,
+                    relief="flat",
+                    highlightthickness=1,
+                    highlightbackground=self.BORDER,
+                    highlightcolor=self.PURPLE,
+                    bd=0,
+                )
                 if valor is not None:
                     control.insert(0, str(valor))
             control.pack(fill="x", ipady=6, pady=(0, 4))
@@ -2590,7 +3224,7 @@ class PanelDocente:
             brand.pack(fill="x")
             tk.Label(brand, text="PRIMARIA", bg=self.NAVY, fg=self.TEAL, font=("Segoe UI", 8, "bold")).pack(anchor="w")
             tk.Label(brand, text="Nezahualcóyotl", bg=self.NAVY, fg=self.TEXT_NAV, font=("Segoe UI", 13, "bold")).pack(anchor="w")
-            tk.Label(brand, text=f"{self.docente_nombre} · {grupo_actual}", bg=self.NAVY, fg=self.MUTED, font=("Segoe UI", 8), wraplength=180, justify="left").pack(anchor="w", pady=(4, 0))
+            tk.Label(brand, text=f"{self.usuario_login} · {self.docente_nombre} ({grupo_actual})", bg=self.NAVY, fg=self.MUTED, font=("Segoe UI", 8), wraplength=180, justify="left").pack(anchor="w", pady=(4, 0))
 
         tk.Frame(self.menu, bg=self.DARK, height=1).pack(fill="x", padx=12, pady=(0, 8))
 
@@ -2602,7 +3236,8 @@ class PanelDocente:
             ("📅", "Horario de Clases"),
             ("!", "Reportar Incidencia"),
             ("💬", "Mensajes a Dirección"),
-            ("⚙", "Resumen del Grupo")]
+            ("⚙", "Resumen del Grupo"),
+        ]
 
         for icon, label in nav:
             activa = self.pagina == label
@@ -2625,12 +3260,19 @@ class PanelDocente:
                 pady=6,
                 anchor="w" if not self.compacto else "center",
                 cursor="hand2",
-                relief="flat"
+                relief="flat",
             ).pack(side="left", fill="both", expand=True)
 
         tk.Frame(self.menu, bg=self.NAVY).pack(fill="both", expand=True)
         tk.Frame(self.menu, bg=self.DARK, height=1).pack(fill="x", padx=10, pady=(0, 6))
-        self.boton(self.menu, "⇦" if self.compacto else "Cerrar sesión", self.cerrar_sesion, self.DARK, self.TEXT_NAV, True).pack(fill="x", padx=8, pady=(0, 10))
+        self.boton(
+            self.menu,
+            "⇦" if self.compacto else "Cerrar sesión",
+            self.cerrar_sesion,
+            self.DARK,
+            self.TEXT_NAV,
+            True,
+        ).pack(fill="x", padx=8, pady=(0, 10))
 
         right_col = tk.Frame(self.root, bg=self.BG)
         right_col.pack(side="left", fill="both", expand=True)
@@ -2645,14 +3287,18 @@ class PanelDocente:
 
         self.lbl_top_seccion = tk.Label(top, text=pagina, bg=self.WHITE, fg=self.TEXT_MAIN, font=("Segoe UI", 14, "bold"))
         self.lbl_top_seccion.pack(anchor="w")
-        self.lbl_top_sub = tk.Label(top, text=f"Docente: {self.docente_nombre} · Grupo exclusivo: {grupo_actual}", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 8))
+        self.lbl_top_sub = tk.Label(
+            top,
+            text=f"Usuario: {self.usuario_login} · Docente: {self.docente_nombre} · Grupo exclusivo: {grupo_actual}",
+            bg=self.WHITE,
+            fg=self.MUTED,
+            font=("Segoe UI", 8),
+        )
         self.lbl_top_sub.pack(anchor="w")
 
-        quick_bar = tk.Frame(right_col, bg=self.WHITE, padx=18, pady=6,
-                             highlightbackground=self.BORDER, highlightthickness=1)
+        quick_bar = tk.Frame(right_col, bg=self.WHITE, padx=18, pady=6, highlightbackground=self.BORDER, highlightthickness=1)
         quick_bar.pack(fill="x")
-        tk.Label(quick_bar, text="Rápido:", bg=self.WHITE, fg=self.MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 8))
+        tk.Label(quick_bar, text="Rápido:", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 8))
         self._botones_rapidos = {}
         for q_txt, q_dest in [
             ("Inicio", "Inicio"),
@@ -2668,7 +3314,7 @@ class PanelDocente:
                 lambda p=q_dest: self.mostrar(p),
                 self.PURPLE if es_act else self.BG,
                 "#FFFFFF" if es_act else self.TEXT_MAIN,
-                True
+                True,
             )
             btn_q.pack(side="left", padx=(0, 6))
             self._botones_rapidos[q_dest] = btn_q
@@ -2718,7 +3364,13 @@ class PanelDocente:
         for col in columnas:
             tabla.heading(col, text=col)
             ancho = (anchos or {}).get(col, 100)
-            tabla.column(col, width=ancho, minwidth=40, anchor="w" if col in ("Alumno", "Motivo", "Descripción", "Nota", "Título", "Asunto", "Mensaje") else "center", stretch=True)
+            tabla.column(
+                col,
+                width=ancho,
+                minwidth=40,
+                anchor="w" if col in ("Alumno", "Motivo", "Descripción", "Nota", "Título", "Asunto", "Mensaje") else "center",
+                stretch=True,
+            )
         for fila in filas:
             tabla.insert("", "end", values=fila)
         return tabla
@@ -2731,14 +3383,15 @@ class PanelDocente:
         self.canvas.yview_moveto(0)
         grupo_actual = self.grupos[0] if self.grupos else "Sin grupo"
         subtitulos = {
-            "Inicio": f"Docente: {self.docente_nombre} · Grupo exclusivo: {grupo_actual}",
+            "Inicio": f"Usuario: {self.usuario_login} · Docente: {self.docente_nombre} · Grupo exclusivo: {grupo_actual}",
             "Mis Alumnos": f"Alumnos inscritos en el grupo {grupo_actual}",
             "Asistencia": f"Registro diario de asistencia · Grupo {grupo_actual}",
             "Justificantes": f"Justificantes del grupo {grupo_actual}",
             "Horario de Clases": f"Horario semanal · Grupo {grupo_actual}",
             "Reportar Incidencia": f"Incidencias de conducta · Grupo {grupo_actual}",
             "Mensajes a Dirección": f"Mensajes de {self.docente_nombre} a Dirección",
-            "Resumen del Grupo": f"Estadísticas del grupo {grupo_actual}"}
+            "Resumen del Grupo": f"Estadísticas del grupo {grupo_actual}",
+        }
         self.titulo(pagina, subtitulos.get(pagina, "Panel Docente"))
         rutas = {
             "Inicio": self.pagina_inicio_docente,
@@ -2748,25 +3401,29 @@ class PanelDocente:
             "Horario de Clases": self.pagina_horario,
             "Reportar Incidencia": self.pagina_reportar_incidencia,
             "Mensajes a Dirección": self.pagina_mensajes,
-            "Resumen del Grupo": self.pagina_resumen_grupo}
+            "Resumen del Grupo": self.pagina_resumen_grupo,
+        }
         rutas.get(pagina, self.pagina_inicio_docente)()
 
     def obtener_alumnos_docente(self):
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            if not self.grupos:
-                return []
-            placeholders = ",".join(["%s"] * len(self.grupos))
-            cur.execute(
-                f"SELECT id, nombre, grupo, retardos, faltas FROM alumnos WHERE grupo IN ({placeholders}) ORDER BY grupo, nombre",
-                tuple(self.grupos)
-            )
-            return cur.fetchall()
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                if not self.grupos:
+                    return []
+                placeholders = ",".join(["%s"] * len(self.grupos))
+                cur.execute(
+                    f"SELECT id, nombre, grupo, retardos, faltas FROM alumnos WHERE grupo IN ({placeholders}) ORDER BY grupo, nombre",
+                    tuple(self.grupos),
+                )
+                return cur.fetchall()
+        except MySQLError:
+            return []
 
     def pagina_inicio_docente(self):
         grupo_actual = self.grupos[0] if self.grupos else "Sin grupo"
 
-        sec = self.seccion(self.contenido, f"Panel exclusivo · Docente: {self.docente_nombre} · Grupo: {grupo_actual}")
+        sec = self.seccion(self.contenido, f"Panel exclusivo · {self.usuario_login} ({self.docente_nombre}) · Grupo: {grupo_actual}")
         sec.pack(fill="x", padx=18, pady=(12, 8))
         box = sec.body
         btns = tk.Frame(box, bg=self.WHITE)
@@ -2783,6 +3440,8 @@ class PanelDocente:
         actions = tk.Frame(box, bg=self.WHITE)
         actions.pack(fill="x", pady=(0, 8))
         self.boton(actions, "Seguimiento", self.seguimiento_docente, self.GOLD, "#FFFFFF").pack(side="left", padx=(0, 6))
+        self.boton(actions, "Editar alumno", self.editar_alumno_docente, self.DARK, self.TEXT_NAV).pack(side="left", padx=(0, 6))
+        self.boton(actions, "Eliminar alumno", self.eliminar_alumno_docente, self.RED, "#FFFFFF").pack(side="left", padx=(0, 6))
         self.boton(actions, "Actualizar", lambda: self.mostrar("Mis Alumnos"), self.BG, self.TEXT_MAIN).pack(side="left")
 
         filas = []
@@ -2800,6 +3459,62 @@ class PanelDocente:
             elif int(vals[3]) > 0:
                 self.tabla_alumnos_doc.item(item, tags=("retardo",))
 
+    def editar_alumno_docente(self):
+        tabla = getattr(self, "tabla_alumnos_doc", None)
+        if not tabla or not tabla.selection():
+            messagebox.showwarning("Selecciona", "Selecciona un alumno de la tabla.")
+            return
+        vals = tabla.item(tabla.selection()[0], "values")
+        alumno_id = int(vals[0])
+        datos = self.formulario_modal(
+            "Editar alumno",
+            [
+                ("Nombre completo", vals[1], None),
+                ("Retardos", vals[3], None),
+                ("Faltas", vals[4], None),
+            ],
+        )
+        if not datos:
+            return
+        try:
+            ret_val = int(datos["Retardos"])
+            fal_val = int(datos["Faltas"])
+            if ret_val < 0 or fal_val < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Valor inválido", "Retardos y faltas deben ser números enteros no negativos.")
+            return
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    "UPDATE alumnos SET nombre=%s, retardos=%s, faltas=%s WHERE id=%s",
+                    (datos["Nombre completo"], ret_val, fal_val, alumno_id),
+                )
+                db.commit()
+            self.mostrar("Mis Alumnos")
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
+
+    def eliminar_alumno_docente(self):
+        tabla = getattr(self, "tabla_alumnos_doc", None)
+        if not tabla or not tabla.selection():
+            messagebox.showwarning("Selecciona", "Selecciona un alumno de la tabla.")
+            return
+        vals = tabla.item(tabla.selection()[0], "values")
+        alumno_id, nombre_al = int(vals[0]), vals[1]
+        if not messagebox.askyesno("Eliminar alumno", f"¿Deseas eliminar a '{nombre_al}' de tu grupo?"):
+            return
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute("DELETE FROM alumnos WHERE id=%s", (alumno_id,))
+                sincronizar_conteo_grupos(cur)
+                db.commit()
+            self.mostrar("Mis Alumnos")
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
+
     def seguimiento_docente(self):
         tabla = getattr(self, "tabla_alumnos_doc", None)
         if not tabla or not tabla.selection():
@@ -2811,13 +3526,18 @@ class PanelDocente:
         if not datos:
             return
         nota = datos[f"Nota para {nombre}"]
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("INSERT INTO seguimientos (alumno_id, fecha, nota) VALUES (%s, %s, %s)",
-                        (alumno_id, date.today().isoformat(), nota))
-            db.commit()
-        messagebox.showinfo("Guardado", "Nota registrada correctamente.")
-        self.mostrar("Mis Alumnos")
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    "INSERT INTO seguimientos (alumno_id, fecha, nota) VALUES (%s, %s, %s)",
+                    (alumno_id, date.today().isoformat(), nota),
+                )
+                db.commit()
+            messagebox.showinfo("Guardado", "Nota registrada correctamente.")
+            self.mostrar("Mis Alumnos")
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
 
     def pagina_asistencia(self):
         sec = self.seccion(self.contenido, f"Registrar asistencia diaria · Grupo {', '.join(self.grupos)}")
@@ -2851,8 +3571,10 @@ class PanelDocente:
                     if cur.fetchone():
                         messagebox.showwarning("Aviso", "Ya hay asistencia registrada para este alumno hoy.")
                         return
-                    cur.execute("INSERT INTO asistencias (alumno_id, fecha, estado) VALUES (%s, %s, %s)",
-                                (alumno_id, hoy, estado))
+                    cur.execute(
+                        "INSERT INTO asistencias (alumno_id, fecha, estado) VALUES (%s, %s, %s)",
+                        (alumno_id, hoy, estado),
+                    )
                     if estado == "Retardo":
                         cur.execute("UPDATE alumnos SET retardos = retardos + 1 WHERE id=%s", (alumno_id,))
                         cur.execute("SELECT retardos FROM alumnos WHERE id=%s", (alumno_id,))
@@ -2874,16 +3596,23 @@ class PanelDocente:
 
         sec_hist = self.seccion(self.contenido, "Historial reciente de asistencia")
         sec_hist.pack(fill="both", padx=18, pady=6)
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            placeholders = ",".join(["%s"] * len(self.grupos)) if self.grupos else "'__NONE__'"
-            cur.execute(f"""
-                SELECT a.fecha, al.nombre, al.grupo, a.estado
-                FROM asistencias a JOIN alumnos al ON al.id = a.alumno_id
-                WHERE al.grupo IN ({placeholders})
-                ORDER BY a.id DESC LIMIT 40
-            """, tuple(self.grupos))
-            rows = cur.fetchall()
+        rows = []
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                placeholders = ",".join(["%s"] * len(self.grupos)) if self.grupos else "'__NONE__'"
+                cur.execute(
+                    f"""
+                    SELECT a.fecha, al.nombre, al.grupo, a.estado
+                    FROM asistencias a JOIN alumnos al ON al.id = a.alumno_id
+                    WHERE al.grupo IN ({placeholders})
+                    ORDER BY a.id DESC LIMIT 40
+                    """,
+                    tuple(self.grupos),
+                )
+                rows = cur.fetchall()
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
         self.crear_tabla(sec_hist.body, ("Fecha", "Alumno", "Grupo", "Estado"), rows, {"Alumno": 180}, 6)
 
     def carga_masiva_asistencia(self):
@@ -2924,8 +3653,10 @@ class PanelDocente:
                             omitidos += 1
                             continue
 
-                        cur.execute("INSERT INTO asistencias (alumno_id, fecha, estado) VALUES (%s, %s, %s)",
-                                    (alumno_id, fecha_reg, estado))
+                        cur.execute(
+                            "INSERT INTO asistencias (alumno_id, fecha, estado) VALUES (%s, %s, %s)",
+                            (alumno_id, fecha_reg, estado),
+                        )
                         if estado == "Retardo":
                             cur.execute("UPDATE alumnos SET retardos = retardos + 1 WHERE id=%s", (alumno_id,))
                             cur.execute("SELECT retardos FROM alumnos WHERE id=%s", (alumno_id,))
@@ -2954,7 +3685,7 @@ class PanelDocente:
             "Registra asistencia de varios alumnos de tu grupo a la vez (puedes usar ID o nombre completo).",
             ["alumno_o_id", "estado", "fecha"],
             ejemplo,
-            procesar
+            procesar,
         )
 
     def pagina_justificantes(self):
@@ -2965,21 +3696,29 @@ class PanelDocente:
         def registrar_justificante():
             alumnos = self.obtener_alumnos_docente()
             nombres_alumnos = [a[1] for a in alumnos]
-            datos = self.formulario_modal("Registrar justificante", [
-                ("Nombre del alumno", nombres_alumnos[0] if nombres_alumnos else "", nombres_alumnos if nombres_alumnos else None),
-                ("Motivo", "", None)
-            ])
+            datos = self.formulario_modal(
+                "Registrar justificante",
+                [
+                    ("Nombre del alumno", nombres_alumnos[0] if nombres_alumnos else "", nombres_alumnos if nombres_alumnos else None),
+                    ("Motivo", "", None),
+                ],
+            )
             if not datos:
                 return
             nombre_al = datos["Nombre del alumno"]
             grupo_al = next((a[2] for a in alumnos if a[1] == nombre_al), self.grupos[0])
-            with self.conectar(incluir_bd=True) as db:
-                cur = db.cursor()
-                cur.execute("INSERT INTO justificantes (alumno, grupo, fecha, motivo) VALUES (%s, %s, %s, %s)",
-                            (nombre_al, grupo_al, date.today().isoformat(), datos["Motivo"]))
-                db.commit()
-            messagebox.showinfo("Guardado", "Justificante registrado.")
-            self.mostrar("Justificantes")
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute(
+                        "INSERT INTO justificantes (alumno, grupo, fecha, motivo) VALUES (%s, %s, %s, %s)",
+                        (nombre_al, grupo_al, date.today().isoformat(), datos["Motivo"]),
+                    )
+                    db.commit()
+                messagebox.showinfo("Guardado", "Justificante registrado.")
+                self.mostrar("Justificantes")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
 
         btns = tk.Frame(box, bg=self.WHITE)
         btns.pack(fill="x")
@@ -2988,14 +3727,18 @@ class PanelDocente:
 
         sec_list = self.seccion(self.contenido, "Justificantes de tu grupo")
         sec_list.pack(fill="both", padx=18, pady=6)
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            placeholders = ",".join(["%s"] * len(self.grupos)) if self.grupos else "'__NONE__'"
-            cur.execute(
-                f"SELECT id, alumno, grupo, fecha, motivo, estado FROM justificantes WHERE grupo IN ({placeholders}) ORDER BY id DESC",
-                tuple(self.grupos)
-            )
-            rows = cur.fetchall()
+        rows = []
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                placeholders = ",".join(["%s"] * len(self.grupos)) if self.grupos else "'__NONE__'"
+                cur.execute(
+                    f"SELECT id, alumno, grupo, fecha, motivo, estado FROM justificantes WHERE grupo IN ({placeholders}) ORDER BY id DESC",
+                    tuple(self.grupos),
+                )
+                rows = cur.fetchall()
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
         self.crear_tabla(sec_list.body, ("ID", "Alumno", "Grupo", "Fecha", "Motivo", "Estado"), rows, {"Alumno": 140, "Motivo": 180}, 6)
 
     def carga_masiva_justificantes(self):
@@ -3020,7 +3763,7 @@ class PanelDocente:
                         grupo_al = grupo_por_alumno.get(nombre_al.lower(), grupo_defecto)
                         cur.execute(
                             "INSERT INTO justificantes (alumno, grupo, fecha, motivo, estado) VALUES (%s, %s, %s, %s, %s)",
-                            (nombre_al, grupo_al, fecha_reg, motivo, estado)
+                            (nombre_al, grupo_al, fecha_reg, motivo, estado),
                         )
                         insertados += 1
                     db.commit()
@@ -3042,7 +3785,7 @@ class PanelDocente:
             "Registra varios justificantes en lote.",
             ["alumno", "motivo", "fecha", "estado"],
             [[ejemplo_nombre, "Cita médica", date.today().isoformat(), "Pendiente"]],
-            procesar
+            procesar,
         )
 
     def pagina_horario(self):
@@ -3059,7 +3802,7 @@ class PanelDocente:
             ("Martes", "08:00 - 09:00", "Ciencias Naturales", grupo_actual),
             ("Miércoles", "10:00 - 11:00", "Educación Física", grupo_actual),
             ("Jueves", "09:00 - 10:00", "Historia / Geografía", grupo_actual),
-            ("Viernes", "08:00 - 09:00", "Artes y Manualidades", grupo_actual)
+            ("Viernes", "08:00 - 09:00", "Artes y Manualidades", grupo_actual),
         ]
         self.crear_tabla(box, ("Día", "Horario", "Asignatura", "Grupo"), horario_ejemplo, {"Día": 100, "Horario": 120, "Asignatura": 160}, 6)
 
@@ -3068,25 +3811,43 @@ class PanelDocente:
         sec.pack(fill="x", padx=18, pady=(14, 6))
 
         def enviar_mensaje():
-            datos = self.formulario_modal("Nuevo Mensaje", [("Asunto", "", None), ("Mensaje", "", None)])
+            datos = self.formulario_modal(
+                "Nuevo Mensaje",
+                [
+                    ("Asunto", "", None),
+                    ("Mensaje", "", None),
+                ],
+            )
             if not datos:
                 return
-            with self.conectar(incluir_bd=True) as db:
-                cur = db.cursor()
-                cur.execute("INSERT INTO mensajes_docente (docente, fecha, asunto, mensaje) VALUES (%s, %s, %s, %s)",
-                            (self.docente_nombre, date.today().isoformat(), datos["Asunto"], datos["Mensaje"]))
-                db.commit()
-            messagebox.showinfo("Enviado", "Mensaje enviado a la dirección correctamente.")
-            self.mostrar("Mensajes a Dirección")
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute(
+                        "INSERT INTO mensajes_docente (docente, fecha, asunto, mensaje) VALUES (%s, %s, %s, %s)",
+                        (self.docente_nombre, date.today().isoformat(), datos["Asunto"], datos["Mensaje"]),
+                    )
+                    db.commit()
+                messagebox.showinfo("Enviado", "Mensaje enviado a la dirección correctamente.")
+                self.mostrar("Mensajes a Dirección")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
 
         self.boton(sec.body, "＋ Enviar mensaje a dirección", enviar_mensaje, self.GOLD, "#FFFFFF").pack(anchor="w")
 
         sec_list = self.seccion(self.contenido, "Historial de Mensajes Enviados")
         sec_list.pack(fill="both", padx=18, pady=6)
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            cur.execute("SELECT fecha, asunto, mensaje FROM mensajes_docente WHERE docente=%s ORDER BY id DESC", (self.docente_nombre,))
-            rows = cur.fetchall()
+        rows = []
+        try:
+            with self.conectar(incluir_bd=True) as db:
+                cur = db.cursor()
+                cur.execute(
+                    "SELECT fecha, asunto, mensaje FROM mensajes_docente WHERE docente=%s ORDER BY id DESC",
+                    (self.docente_nombre,),
+                )
+                rows = cur.fetchall()
+        except MySQLError as e:
+            messagebox.showerror("Error MySQL", str(e))
         if not rows:
             rows = [("2026-10-28", "Solicitud de material deportivo", "Requerimos balones para la clase de educación física.")]
         self.crear_tabla(sec_list.body, ("Fecha", "Asunto", "Mensaje"), rows, {"Asunto": 160, "Mensaje": 260}, 5)
@@ -3109,7 +3870,17 @@ class PanelDocente:
         controles = {}
         for campo, val, opts_c in datos:
             tk.Label(box, text=campo, bg=self.WHITE, fg=fg_l, font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(2, 2))
-            c = tk.Entry(box, font=("Segoe UI", 9), bg=self.WHITE, fg=fg_l, relief="flat", highlightthickness=1, highlightbackground=self.BORDER, highlightcolor=self.PURPLE, bd=0)
+            c = tk.Entry(
+                box,
+                font=("Segoe UI", 9),
+                bg=self.WHITE,
+                fg=fg_l,
+                relief="flat",
+                highlightthickness=1,
+                highlightbackground=self.BORDER,
+                highlightcolor=self.PURPLE,
+                bd=0,
+            )
             c.pack(fill="x", ipady=5, pady=(0, 6))
             controles[campo] = c
 
@@ -3120,13 +3891,18 @@ class PanelDocente:
             if not tipo or not desc:
                 messagebox.showwarning("Incompletos", "Completa todos los campos.")
                 return
-            with self.conectar(incluir_bd=True) as db:
-                cur = db.cursor()
-                cur.execute("INSERT INTO incidencias (alumno_id, fecha, tipo, descripcion, estado) VALUES (%s, %s, %s, %s, 'Pendiente')",
-                            (alumno_id, date.today().isoformat(), tipo, desc))
-                db.commit()
-            messagebox.showinfo("Enviado", "Incidencia reportada a dirección.")
-            self.mostrar("Reportar Incidencia")
+            try:
+                with self.conectar(incluir_bd=True) as db:
+                    cur = db.cursor()
+                    cur.execute(
+                        "INSERT INTO incidencias (alumno_id, fecha, tipo, descripcion, estado) VALUES (%s, %s, %s, %s, 'Pendiente')",
+                        (alumno_id, date.today().isoformat(), tipo, desc),
+                    )
+                    db.commit()
+                messagebox.showinfo("Enviado", "Incidencia reportada a dirección.")
+                self.mostrar("Reportar Incidencia")
+            except MySQLError as e:
+                messagebox.showerror("Error MySQL", str(e))
 
         self.boton(box, "Enviar a dirección", guardar, self.GOLD, "#FFFFFF").pack(anchor="w", pady=(4, 0))
 
@@ -3140,7 +3916,7 @@ class PanelDocente:
         sec_col = self.seccion(self.contenido, "Personalización de colores del docente (MySQL)")
         sec_col.pack(fill="x", padx=18, pady=(14, 6))
         construir_bloque_personalizacion_colores(
-            self, sec_col.body, self.docente_nombre, self._aplicar_colores_guardados_doc
+            self, sec_col.body, self.usuario_login, self._aplicar_colores_guardados_doc
         )
 
         sec = self.seccion(self.contenido, "Estadísticas del Grupo")
@@ -3153,7 +3929,7 @@ class PanelDocente:
         regulares = total - con_faltas - con_retardos
 
         fg_lbl = self.TEXT_MAIN
-        tk.Label(box, text=f"Docente: {self.docente_nombre}", bg=self.WHITE, fg=fg_lbl, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=2)
+        tk.Label(box, text=f"Usuario: {self.usuario_login} · Docente: {self.docente_nombre}", bg=self.WHITE, fg=fg_lbl, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=2)
         tk.Label(box, text=f"Grupo exclusivo a cargo: {', '.join(self.grupos)}", bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 8)).pack(anchor="w", pady=1)
         tk.Label(box, text=f"Total de alumnos matriculados: {total}", bg=self.WHITE, fg=fg_lbl, font=("Segoe UI", 8)).pack(anchor="w", pady=(1, 10))
 
@@ -3163,7 +3939,7 @@ class PanelDocente:
         categorias = [
             ("Regulares / Normales", regulares, self.GOLD),
             ("Con Retardos", con_retardos, self.TEAL),
-            ("Con Faltas (Alerta)", con_faltas, self.RED)
+            ("Con Faltas (Alerta)", con_faltas, self.RED),
         ]
 
         for label, count, color in categorias:
