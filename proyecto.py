@@ -227,22 +227,21 @@ def sincronizar_conteo_grupos(cursor):
         if real_count > 0 or not meta_actual:
             cursor.execute("UPDATE grupos SET alumnos=%s WHERE id=%s", (real_count, grp_id))
 
-
 def inicializar_base_datos_principal():
     try:
         with conectar_mysql(incluir_bd=False) as srv:
             cur = srv.cursor()
             cur.execute(
-                f"CREATE DATABASE IF NOT EXISTS {DB_NOMBRE} "
+                "CREATE DATABASE IF NOT EXISTS primaria_nezahualcoyotl_db "
                 "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
             )
             srv.commit()
 
         with conectar_mysql(incluir_bd=True) as db:
             cur = db.cursor()
-            _ejecutar_script_mysql(cur, f"""
-                CREATE DATABASE IF NOT EXISTS {DB_NOMBRE};
-                USE {DB_NOMBRE};
+            _ejecutar_script_mysql(cur, """
+                CREATE DATABASE IF NOT EXISTS primaria_nezahualcoyotl_db;
+                USE primaria_nezahualcoyotl_db;
 
                 CREATE TABLE IF NOT EXISTS metricas (
                     nombre VARCHAR(50) PRIMARY KEY,
@@ -370,7 +369,7 @@ def inicializar_base_datos_principal():
             sincronizar_conteo_grupos(cur)
             db.commit()
     except MySQLError as e:
-        messagebox.showerror("Error de conexión MySQL", f"No se pudo inicializar {DB_NOMBRE}:\n{e}")
+        messagebox.showerror("Error de conexión MySQL", f"No se pudo inicializar primaria_nezahualcoyotl_db:\n{e}")
 
 
 def obtener_rango_semana_actual(ref_fecha=None):
