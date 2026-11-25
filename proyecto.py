@@ -8,7 +8,7 @@ import sys
 import csv
 import io
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import calendar
 
 # ==========================================================
@@ -252,7 +252,7 @@ def inicializar_base_datos_principal():
         with conectar_mysql(incluir_bd=True) as db:
             cur = db.cursor()
             _ejecutar_script_mysql(cur, """
-                CREATE DATABASE primaria_nezahualcoyotl_db;
+                CREATE DATABASE IF NOT EXISTS primaria_nezahualcoyotl_db;
                 USE primaria_nezahualcoyotl_db;
 
                 CREATE TABLE IF NOT EXISTS metricas (
@@ -376,6 +376,206 @@ def inicializar_base_datos_principal():
             db.commit()
     except MySQLError as e:
         messagebox.showerror("Error de conexión MySQL", f"No se pudo inicializar {DB_NOMBRE}:\n{e}")
+
+
+def obtener_rango_semana_actual(ref_fecha=None):
+    """Devuelve (lunes_str, domingo_str) de la semana actual (Lunes a Domingo)."""
+    hoy_dt = ref_fecha or date.today()
+    lunes = hoy_dt - timedelta(days=hoy_dt.weekday())
+    domingo = lunes + timedelta(days=6)
+    return lunes.isoformat(), domingo.isoformat()
+
+
+def clasificar_alumnos_campanas(alumnos_lista, asistencias_semana=None):
+    """Clasifica alumnos en:
+    - verde: solo tienen 1 falta (faltas == 1) en la semana
+    - amarillo: más de 2 retardos (retardos > 2) o 2 faltas (faltas == 2) en la semana
+    - rojo: más de 2 faltas (faltas > 2) o más de 2 retardos (retardos > 2) en una misma semana
+    """
+    asistencias_semana = asistencias_semana or {}
+    verde, amarillo, rojo = [], [], []
+
+    for ident, nombre, grupo, ret_tot, fal_tot in alumnos_lista:
+        if ident in asistencias_semana:
+            ret_sem, fal_sem = asistencias_semana[ident]
+        else:
+            ret_sem, fal_sem = int(ret_tot), int(fal_tot)
+
+        if fal_sem > 2 or ret_sem > 2:
+            rojo.append((ident, nombre, grupo, ret_sem, fal_sem, "Más de 2 faltas o retardos en la semana"))
+        elif ret_sem > 2 or fal_sem == 2:
+            amarillo.append((ident, nombre, grupo, ret_sem, fal_sem, "Más de 2 retardos o 2 faltas en la semana"))
+        elif fal_sem == 1:
+            verde.append((ident, nombre, grupo, ret_sem, fal_sem, "Solo 1 falta en la semana"))
+
+    return {"verde": verde, "amarillo": amarillo, "rojo": rojo}
+
+
+def obtener_datos_campanas_mysql(grupos_filtro=None):
+    """Consulta MySQL y devuelve (conteos, listas_por_color, lunes_str, domingo_str)."""
+    lunes_str, domingo_str = obtener_rango_semana_actual()
+    alumnos = []
+    asistencias_semana = {}
+
+    try:
+        with conectar_mysql(incluir_bd=True) as db:
+            cur = db.cursor()
+            if grupos_filtro:
+                ph = ",".join(["%s"] * len(grupos_filtro))
+                cur.execute(
+                    f"SELECT id, nombre, grupo, retardos, faltas FROM alumnos WHERE grupo IN ({ph}) ORDER BY grupo, nombre",
+                    tuple(grupos_filtro)
+                )
+            else:
+                cur.execute("SELECT id, nombre, grupo, retardos, faltas FROM alumnos ORDER BY grupo, nombre")
+            alumnos = cur.fetchall()
+
+            ids = [a[0] for a in alumnos]
+            if ids:
+                ph_ids = ",".join(["%s"] * len(ids))
+                cur.execute(
+                    f"""
+                    SELECT alumno_id,
+                           SUM(CASE WHEN estado='Retardo' THEN 1 ELSE 0 END) AS ret_sem,
+                           SUM(CASE WHEN estado='Falta' THEN 1 ELSE 0 END) AS fal_sem
+                    FROM asistencias
+                    WHERE fecha BETWEEN %s AND %s AND alumno_id IN ({ph_ids})
+                    GROUP BY alumno_id
+                    """,
+                    (lunes_str, domingo_str, *ids)
+                )
+                for al_id, r_s, f_s in cur.fetchall():
+                    asistencias_semana[int(al_id)] = (int(r_s or 0), int(f_s or 0))
+    except MySQLError:
+        pass
+
+    listas = clasificar_alumnos_campanas(alumnos, asistencias_semana)
+    conteos = {k: len(v) for k, v in listas.items()}
+    return conteos, listas, lunes_str, domingo_str
+
+
+def crear_barra_campanas_semaforo(app, parent, grupos_filtro=None):
+    """Crea los 3 botones circulares con signo de campana (Verde, Amarillo y Rojo) con notificaciones."""
+    conteos, listas, lunes_str, domingo_str = obtener_datos_campanas_mysql(grupos_filtro=grupos_filtro)
+
+    config_botones = [
+        (
+            "verde",
+            "#22C55E",
+            "#15803D",
+            "Campana Verde · 1 falta en la semana",
+            "Alumnos que solo tienen una falta en la semana",
+            app.GREEN_SOFT,
+        ),
+        (
+            "amarillo",
+            "#EAB308",
+            "#A16207",
+            "Campana Amarilla · >2 retardos o 2 faltas",
+            "Alumnos con más de 2 retardos o 2 faltas en la semana",
+            app.YELLOW_SOFT,
+        ),
+        (
+            "rojo",
+            "#EF4444",
+            "#B91C1C",
+            "Campana Roja · >2 faltas o retardos en la semana",
+            "Alumnos con más de 2 faltas o retardos en una misma semana",
+            app.RED_SOFT,
+        ),
+    ]
+
+    contenedor = tk.Frame(parent, bg=app.WHITE)
+    for clave, bg_btn, active_bg, titulo_modal, sub_modal, bg_aviso in config_botones:
+        cant = conteos.get(clave, 0)
+        texto_btn = f"🔔 {cant}" if cant else "🔔"
+        lst_actual = listas.get(clave, [])
+
+        def _abrir_notificacion(
+            c=clave,
+            t=titulo_modal,
+            s=sub_modal,
+            b_aviso=bg_aviso,
+            lst=lst_actual,
+            lun=lunes_str,
+            dom=domingo_str,
+        ):
+            if c == "rojo" and lst:
+                nombres_al = ", ".join(f"{x[1]} ({x[2]})" for x in lst[:5])
+                messagebox.showwarning(
+                    "Notificación crítica · Campana Roja",
+                    f"Semana ({lun} al {dom}): {len(lst)} alumno(s) con más de 2 faltas o retardos:\n{nombres_al}"
+                )
+            elif c == "amarillo" and lst:
+                messagebox.showinfo(
+                    "Notificación de prevención · Campana Amarilla",
+                    f"Semana ({lun} al {dom}): {len(lst)} alumno(s) con más de 2 retardos o 2 faltas."
+                )
+            elif c == "verde" and lst:
+                messagebox.showinfo(
+                    "Notificación · Campana Verde",
+                    f"Semana ({lun} al {dom}): {len(lst)} alumno(s) con 1 falta."
+                )
+
+            win = tk.Toplevel(app.root)
+            win.title(t)
+            win.configure(bg=app.BG)
+            win.transient(app.root)
+            win.geometry("620x420")
+
+            head = tk.Frame(win, bg=app.NAVY, padx=16, pady=12)
+            head.pack(fill="x")
+            tk.Label(head, text=t, bg=app.NAVY, fg=app.TEXT_NAV, font=("Segoe UI", 12, "bold")).pack(anchor="w")
+            tk.Label(head, text=f"{s} · Semana {lun} al {dom}", bg=app.NAVY, fg=app.TEAL, font=("Segoe UI", 8)).pack(anchor="w")
+
+            body = tk.Frame(win, bg=app.BG, padx=16, pady=12)
+            body.pack(fill="both", expand=True)
+
+            tk.Label(
+                body,
+                text=f"Total en esta notificación: {len(lst)} alumno(s)",
+                bg=b_aviso,
+                fg=app.TEXT_SOFT,
+                font=("Segoe UI", 9, "bold"),
+                padx=10,
+                pady=6,
+                anchor="w"
+            ).pack(fill="x", pady=(0, 8))
+
+            frame_t = tk.Frame(body, bg=app.WHITE, highlightbackground=app.BORDER, highlightthickness=1)
+            frame_t.pack(fill="both", expand=True)
+            cols = ("ID", "Alumno", "Grupo", "Retardos Sem.", "Faltas Sem.", "Criterio")
+            tv = ttk.Treeview(frame_t, columns=cols, show="headings", height=8)
+            vs = ttk.Scrollbar(frame_t, orient="vertical", command=tv.yview)
+            tv.configure(yscrollcommand=vs.set)
+            vs.pack(side="right", fill="y")
+            tv.pack(side="left", fill="both", expand=True)
+            for col in cols:
+                tv.heading(col, text=col)
+                tv.column(col, width=180 if col in ("Alumno", "Criterio") else 80, anchor="w" if col in ("Alumno", "Criterio") else "center")
+            for fila in lst:
+                tv.insert("", "end", values=fila)
+
+        btn = tk.Button(
+            contenedor,
+            text=texto_btn,
+            command=_abrir_notificacion,
+            bg=bg_btn,
+            fg="#FFFFFF",
+            activebackground=active_bg,
+            activeforeground="#FFFFFF",
+            font=("Segoe UI", 9, "bold"),
+            bd=2,
+            relief="raised",
+            padx=9,
+            pady=4,
+            cursor="hand2",
+            highlightbackground="#111827",
+            highlightthickness=1,
+        )
+        btn.pack(side="left", padx=(0, 5))
+
+    return contenedor
 
 
 def cargar_preferencia_usuario_mysql(usuario):
@@ -655,49 +855,6 @@ def abrir_modal_carga_masiva(parent_app, titulo, descripcion, columnas_csv, ejem
 
     parent_app.boton(pie, "Cancelar", win.destroy, bg, fg_main, True).pack(side="right", padx=(8, 0))
     parent_app.boton(pie, "Importar registros", ejecutar, gold, "#FFFFFF", True).pack(side="right")
-
-
-def abrir_ventana_notificaciones(app, alumnos_lista, just_pendientes=0, inc_pendientes=0):
-    """Abre ventana de notificaciones (enlazada al botón superior derecho de Notificaciones)."""
-    win = tk.Toplevel(app.root)
-    win.title("Notificaciones escolares")
-    win.configure(bg=app.BG)
-    win.transient(app.root)
-    win.geometry("540x430")
-
-    head = tk.Frame(win, bg=app.NAVY, padx=16, pady=12)
-    head.pack(fill="x")
-    tk.Label(head, text="Notificaciones", bg=app.NAVY, fg=app.TEXT_NAV, font=("Segoe UI", 13, "bold")).pack(anchor="w")
-    tk.Label(head, text="Avisos pendientes, faltas y retardos constantes", bg=app.NAVY, fg=app.TEAL, font=("Segoe UI", 8)).pack(anchor="w")
-
-    body = tk.Frame(win, bg=app.BG, padx=16, pady=14)
-    body.pack(fill="both", expand=True)
-
-    avisos = []
-    if just_pendientes:
-        avisos.append((f"{just_pendientes} justificante(s) pendiente(s) por validar.", app.BLUE_SOFT))
-    if inc_pendientes:
-        avisos.append((f"{inc_pendientes} incidencia(s) pendiente(s) de seguimiento.", app.RED_SOFT))
-
-    constantes = [a for a in alumnos_lista if int(a[3]) > 0 or int(a[4]) > 0]
-    for _, nombre, grupo, ret, fal in sorted(constantes, key=lambda x: (-int(x[4]), -int(x[3]), x[1]))[:8]:
-        ret_i, fal_i = int(ret), int(fal)
-        eq_i = ret_i // UMBRAL_FALTAS
-        color = app.RED_SOFT if fal_i >= UMBRAL_FALTAS or eq_i > 0 else app.YELLOW_SOFT
-        avisos.append((
-            f"{nombre} ({grupo}) — {fal_i} falta(s), {ret_i} retardo(s) [Equiv.: +{eq_i} falta(s)]",
-            color
-        ))
-
-    if not avisos:
-        avisos.append(("Sin notificaciones pendientes por el momento.", app.GREEN_SOFT))
-
-    for texto_aviso, bg_aviso in avisos:
-        tk.Label(
-            body, text=texto_aviso, bg=bg_aviso, fg=app.TEXT_SOFT,
-            font=("Segoe UI", 8, "bold"), anchor="w", justify="left",
-            padx=10, pady=7
-        ).pack(fill="x", pady=3)
 
 
 class PanelDireccion:
@@ -985,6 +1142,19 @@ class PanelDireccion:
         if messagebox.askyesno("Cerrar sesión", "¿Deseas salir al inicio de sesión?"):
             self.pantalla_login()
 
+    def _refrescar_barra_rapida(self):
+        botones_rapidos = getattr(self, "_botones_rapidos", None)
+        if not botones_rapidos:
+            return
+        for dest, btn in botones_rapidos.items():
+            if not btn.winfo_exists():
+                continue
+            es_act = self.pagina == dest
+            btn.configure(
+                bg=self.PURPLE if es_act else self.BG,
+                fg="#FFFFFF" if es_act else self.TEXT_MAIN,
+            )
+
     def crear_panel(self, pagina="Inicio"):
         self.pagina = pagina
         self.limpiar_raiz()
@@ -1064,7 +1234,7 @@ class PanelDireccion:
 
         btn_tema_txt = "Modo Oscuro" if not self.modo_oscuro else "Modo Claro"
         self.boton(top, btn_tema_txt, self.cambiar_tema, self.BG, self.TEXT_MAIN, True).pack(side="right", padx=(8, 0))
-        self.boton(top, "Notificaciones", self._abrir_notificaciones_dir, self.LAVENDER, self.TEXT_SOFT, True).pack(side="right", padx=(8, 0))
+        crear_barra_campanas_semaforo(self, top, grupos_filtro=None).pack(side="right", padx=(0, 8))
         tk.Label(top, text=date.today().strftime("%d/%m/%Y"),
                  bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 9, "bold")).pack(side="right", padx=8)
 
@@ -1080,6 +1250,7 @@ class PanelDireccion:
         quick_bar.pack(fill="x")
         tk.Label(quick_bar, text="Rápido:", bg=self.WHITE, fg=self.MUTED,
                  font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 8))
+        self._botones_rapidos = {}
         for q_txt, q_dest in [
             ("Inicio", "Inicio"),
             ("Grupos", "Grupos y Docentes"),
@@ -1088,14 +1259,16 @@ class PanelDireccion:
             ("Reportes", "Reportes Periódicos"),
         ]:
             es_act = self.pagina == q_dest
-            self.boton(
+            btn_q = self.boton(
                 quick_bar,
                 q_txt,
                 lambda p=q_dest: self.mostrar(p),
                 self.PURPLE if es_act else self.BG,
                 "#FFFFFF" if es_act else self.TEXT_MAIN,
                 True
-            ).pack(side="left", padx=(0, 6))
+            )
+            btn_q.pack(side="left", padx=(0, 6))
+            self._botones_rapidos[q_dest] = btn_q
 
         area = tk.Frame(right_col, bg=self.BG)
         area.pack(fill="both", expand=True)
@@ -1109,14 +1282,6 @@ class PanelDireccion:
         self.contenido.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self.window_id, width=e.width))
         self.mostrar(pagina)
-
-    def _abrir_notificaciones_dir(self):
-        abrir_ventana_notificaciones(
-            self,
-            self.obtener_alumnos(),
-            just_pendientes=self.contar_justificantes(),
-            inc_pendientes=self.contar_incidencias()
-        )
 
     def titulo(self, texto, subtitulo="Resumen general de la actividad escolar"):
         if hasattr(self, "lbl_top_seccion") and self.lbl_top_seccion.winfo_exists():
@@ -1177,6 +1342,7 @@ class PanelDireccion:
             return
 
         self.pagina = f"KPI · {filtro_kpi}"
+        self._refrescar_barra_rapida()
         for w in self.contenido.winfo_children():
             w.destroy()
         self.canvas.yview_moveto(0)
@@ -1238,6 +1404,7 @@ class PanelDireccion:
 
     def mostrar(self, pagina):
         self.pagina = pagina
+        self._refrescar_barra_rapida()
         for w in self.contenido.winfo_children():
             w.destroy()
         self.canvas.yview_moveto(0)
@@ -2392,6 +2559,19 @@ class PanelDocente:
             self.limpiar_raiz()
             PanelDireccion(self.root, self.modo_oscuro)
 
+    def _refrescar_barra_rapida(self):
+        botones_rapidos = getattr(self, "_botones_rapidos", None)
+        if not botones_rapidos:
+            return
+        for dest, btn in botones_rapidos.items():
+            if not btn.winfo_exists():
+                continue
+            es_act = self.pagina == dest
+            btn.configure(
+                bg=self.PURPLE if es_act else self.BG,
+                fg="#FFFFFF" if es_act else self.TEXT_MAIN,
+            )
+
     def crear_panel(self, pagina="Inicio"):
         self.pagina = pagina
         self.limpiar_raiz()
@@ -2460,7 +2640,7 @@ class PanelDocente:
 
         btn_tema_txt = "Modo Oscuro" if not self.modo_oscuro else "Modo Claro"
         self.boton(top, btn_tema_txt, self.cambiar_tema, self.BG, self.TEXT_MAIN, True).pack(side="right", padx=(8, 0))
-        self.boton(top, "Notificaciones", self._abrir_notificaciones_doc, self.LAVENDER, self.TEXT_SOFT, True).pack(side="right", padx=(8, 0))
+        crear_barra_campanas_semaforo(self, top, grupos_filtro=self.grupos).pack(side="right", padx=(0, 8))
         tk.Label(top, text=date.today().strftime("%d/%m/%Y"), bg=self.WHITE, fg=self.MUTED, font=("Segoe UI", 9, "bold")).pack(side="right", padx=8)
 
         self.lbl_top_seccion = tk.Label(top, text=pagina, bg=self.WHITE, fg=self.TEXT_MAIN, font=("Segoe UI", 14, "bold"))
@@ -2473,6 +2653,7 @@ class PanelDocente:
         quick_bar.pack(fill="x")
         tk.Label(quick_bar, text="Rápido:", bg=self.WHITE, fg=self.MUTED,
                  font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 8))
+        self._botones_rapidos = {}
         for q_txt, q_dest in [
             ("Inicio", "Inicio"),
             ("Mis Alumnos", "Mis Alumnos"),
@@ -2481,14 +2662,16 @@ class PanelDocente:
             ("Resumen", "Resumen del Grupo"),
         ]:
             es_act = self.pagina == q_dest
-            self.boton(
+            btn_q = self.boton(
                 quick_bar,
                 q_txt,
                 lambda p=q_dest: self.mostrar(p),
                 self.PURPLE if es_act else self.BG,
                 "#FFFFFF" if es_act else self.TEXT_MAIN,
                 True
-            ).pack(side="left", padx=(0, 6))
+            )
+            btn_q.pack(side="left", padx=(0, 6))
+            self._botones_rapidos[q_dest] = btn_q
 
         area = tk.Frame(right_col, bg=self.BG)
         area.pack(fill="both", expand=True)
@@ -2502,22 +2685,6 @@ class PanelDocente:
         self.contenido.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self.window_id, width=e.width))
         self.mostrar(pagina)
-
-    def _abrir_notificaciones_doc(self):
-        with self.conectar(incluir_bd=True) as db:
-            cur = db.cursor()
-            placeholders = ",".join(["%s"] * len(self.grupos)) if self.grupos else "'__NONE__'"
-            cur.execute(
-                f"SELECT COUNT(*) FROM justificantes WHERE estado='Pendiente' AND grupo IN ({placeholders})",
-                tuple(self.grupos)
-            )
-            just_pend = cur.fetchone()[0]
-            cur.execute(
-                f"SELECT COUNT(*) FROM incidencias i JOIN alumnos a ON a.id = i.alumno_id WHERE i.estado='Pendiente' AND a.grupo IN ({placeholders})",
-                tuple(self.grupos)
-            )
-            inc_pend = cur.fetchone()[0]
-        abrir_ventana_notificaciones(self, self.obtener_alumnos_docente(), just_pendientes=just_pend, inc_pendientes=inc_pend)
 
     def titulo(self, texto, subtitulo="Gestión exclusiva de tu grupo asignado"):
         if hasattr(self, "lbl_top_seccion") and self.lbl_top_seccion.winfo_exists():
@@ -2558,6 +2725,7 @@ class PanelDocente:
 
     def mostrar(self, pagina):
         self.pagina = pagina
+        self._refrescar_barra_rapida()
         for w in self.contenido.winfo_children():
             w.destroy()
         self.canvas.yview_moveto(0)
