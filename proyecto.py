@@ -1266,7 +1266,24 @@ class PanelDireccion:
             bd=0,
         )
         clave.pack(fill="x", ipady=7, pady=(0, 16))
+def alternar_contrasena():
+    if clave.cget("show"):
+        clave.configure(show="")
+        btn_mostrar.configure(text="Ocultar contraseña")
+    else:
+        clave.configure(show="•")
+        btn_mostrar.configure(text="Mostrar contraseña")
 
+btn_mostrar = self.boton(
+    caja,
+    "Mostrar contraseña",
+    alternar_contrasena,
+    self.BG,
+    fg_caja,
+    True,
+)
+
+btn_mostrar.pack(anchor="e", pady=(0, 12))
         def entrar(event=None):
             user = usuario.get().strip()
             passw = clave.get().strip()
